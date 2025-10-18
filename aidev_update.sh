@@ -58,18 +58,15 @@ fi
 echo "✓ All dependencies found"
 echo ""
 
+
 echo "------------------------------------------------------------"
-echo "Claude Code CLI"
+run_update "$SCRIPT_DIR/openspec_update.sh" "OpenSpec Update"
+
+echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/claude_update.sh" "Claude Code CLI Update"
 
 echo "------------------------------------------------------------"
-echo "OpenCode CLI"
-echo "Current version:"
-opencode --version 2>/dev/null || echo "Not installed"
-echo "Installing latest version..."
-npm install -g opencode-ai@latest
-echo "Updated version:"
-opencode --version 2>/dev/null || echo "Installation failed"
+run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/ccr_update.sh" "Claude Code Router Update"
@@ -89,43 +86,19 @@ echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/codex_update.sh" "OpenAI Codex Update"
 
 echo "------------------------------------------------------------"
-echo "Qwen Code"
-echo "Current version:"
-qwen --version 2>/dev/null || echo "Not installed"
-echo "Installing latest version..."
-npm install -g @qwen-code/qwen-code@preview
-echo "Updated version:"
-qwen --version 2>/dev/null || echo "Installation failed"
+run_update "$SCRIPT_DIR/qwen_update.sh" "Qwen Code Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/amp_update.sh" "Amp Code Update"
 
 echo "------------------------------------------------------------"
-echo "llxprt-code - fork of Gemini CLI"
-echo "Current version:"
-llxprt --version 2>/dev/null || echo "Not installed"
-echo "Installing latest version..."
-npm install -g @vybestack/llxprt-code@latest
-echo "Updated version:"
-llxprt --version 2>/dev/null || echo "Installation failed"
+run_update "$SCRIPT_DIR/llxprt_update.sh" "LLxprt Code Update"
 
 echo "------------------------------------------------------------"
-echo "justcode"
-echo "Current version:"
-coder --version 2>/dev/null || echo "Not installed"
-echo "Installing latest version..."
-npm install -g @just-every/code
-echo "Updated version:"
-coder --version 2>/dev/null || echo "Installation failed"
+run_update "$SCRIPT_DIR/justcode_update.sh" "JustCode Update"
 
 echo "------------------------------------------------------------"
-echo "codebuff"
-echo "Current version:"
-codebuff --version 2>/dev/null || echo "Not installed"
-echo "Installing latest version..."
-npm install -g codebuff
-echo "Updated version:"
-codebuff --version 2>/dev/null || echo "Installation failed"
+run_update "$SCRIPT_DIR/codebuff_update.sh" "Codebuff Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
