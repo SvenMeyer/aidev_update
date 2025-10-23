@@ -43,10 +43,43 @@ RC_VERSION=$(retry_command npm view task-master-ai@rc version 2>/dev/null || tru
 STABLE_VERSION=${STABLE_VERSION:-}
 RC_VERSION=${RC_VERSION:-}
 
-if [ -n "$RC_VERSION" ]; then
+# Function to convert version to comparable format (remove suffixes)
+normalize_version() {
+    echo "$1" | sed 's/-rc\.[0-9]\+$//' | sed 's/-.*$//'
+}
+
+# Function to extract RC number
+get_rc_number() {
+    echo "$1" | grep -o 'rc\.[0-9]\+' | sed 's/rc\.//' || echo "0"
+}
+
+# Compare versions and determine which one to use
+if [ -n "$RC_VERSION" ] && [ -n "$STABLE_VERSION" ]; then
+    # Both exist, compare actual versions
+    RC_NORMALIZED=$(normalize_version "$RC_VERSION")
+    STABLE_NORMALIZED=$(normalize_version "$STABLE_VERSION")
+
+    if [ "$RC_NORMALIZED" = "$STABLE_NORMALIZED" ]; then
+        # Same base version, prefer stable
+        DESIRED_CHANNEL="latest"
+        DESIRED_VERSION="$STABLE_VERSION"
+    else
+        # Use sort -V for proper semantic version comparison
+        HIGHER_VERSION=$(echo -e "$RC_NORMALIZED\n$STABLE_NORMALIZED" | sort -V | tail -1)
+        if [ "$HIGHER_VERSION" = "$RC_NORMALIZED" ]; then
+            DESIRED_CHANNEL="rc"
+            DESIRED_VERSION="$RC_VERSION"
+        else
+            DESIRED_CHANNEL="latest"
+            DESIRED_VERSION="$STABLE_VERSION"
+        fi
+    fi
+elif [ -n "$RC_VERSION" ]; then
+    # Only RC exists
     DESIRED_CHANNEL="rc"
     DESIRED_VERSION="$RC_VERSION"
 else
+    # Only stable exists
     DESIRED_CHANNEL="latest"
     DESIRED_VERSION="$STABLE_VERSION"
 fi
