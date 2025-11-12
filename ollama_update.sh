@@ -33,8 +33,9 @@ if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
 elif [ "$CURRENT_VERSION" = "not installed" ]; then
     echo "Installing Ollama (version $LATEST_VERSION)"
 else
-    # Check if current version is newer (pre-release) than latest stable
-    if [[ "$CURRENT_VERSION" > "$LATEST_VERSION" ]]; then
+    # Check if current version is newer (pre-release) than latest stable using proper version comparison
+    HIGHER_VERSION=$(echo -e "$CURRENT_VERSION\n$LATEST_VERSION" | sort -V | tail -1)
+    if [ "$CURRENT_VERSION" = "$HIGHER_VERSION" ] && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
         echo "✓ Ollama version $CURRENT_VERSION is newer than the latest stable release ($LATEST_VERSION)"
         echo "You're running a pre-release version. Skipping update."
         exit 0
