@@ -104,6 +104,13 @@ fi
 
 echo "Update required: $CURRENT_VERSION -> $LATEST_VERSION"
 
+# Request sudo upfront to avoid timeout issues during installation
+echo "Requesting sudo permission (needed for installation)..."
+if ! sudo -v; then
+  echo "Failed to get sudo permission." >&2
+  exit 1
+fi
+
 # Download the official installer to a local file
 INSTALLER_PATH="$(dirname "$0")/ollama_install.sh"
 
@@ -114,7 +121,6 @@ if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
 fi
 
 echo "Running installer for version $LATEST_VERSION ..."
-echo "Note: You may be prompted for sudo password."
 if ! OLLAMA_VERSION="$LATEST_VERSION" sh "$INSTALLER_PATH"; then
   echo "Install failed via official installer." >&2
   exit 1
