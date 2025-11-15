@@ -54,9 +54,49 @@ if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
   exit 0
 fi
 
+# Version comparison that properly handles RC/pre-release versions
+# Returns 0 if current >= latest, 1 otherwise
+is_current_newer_or_equal() {
+  local cur="$1"
+  local lat="$2"
+  
+  # Strip -rc suffix for base version comparison
+  local cur_base="${cur%%-rc*}"
+  local lat_base="${lat%%-rc*}"
+  
+  # If base versions are different, compare them
+  if [ "$cur_base" != "$lat_base" ]; then
+    local higher=$(printf "%s\n%s\n" "$cur_base" "$lat_base" | sort -V | tail -1)
+    [ "$higher" = "$cur_base" ] && return 0 || return 1
+  fi
+  
+  # Base versions are the same, now check RC status
+  # If current has -rc and latest doesn't, current is older (return 1)
+  # If latest has -rc and current doesn't, current is newer (return 0)
+  # If both have -rc, compare the RC numbers
+  
+  if [[ "$cur" =~ -rc([0-9]+)$ ]]; then
+    local cur_rc="${BASH_REMATCH[1]}"
+    if [[ "$lat" =~ -rc([0-9]+)$ ]]; then
+      local lat_rc="${BASH_REMATCH[1]}"
+      [ "$cur_rc" -ge "$lat_rc" ] && return 0 || return 1
+    else
+      # Current is RC, latest is stable -> current is older
+      return 1
+    fi
+  else
+    if [[ "$lat" =~ -rc([0-9]+)$ ]]; then
+      # Current is stable, latest is RC -> current is newer
+      return 0
+    else
+      # Both are stable and base versions are equal -> they're equal
+      return 0
+    fi
+  fi
+}
+
 if [ "$CURRENT_VERSION" != "not installed" ] && [ "$CURRENT_VERSION" != "unknown" ]; then
-  HIGHER=$(printf "%s\n%s\n" "$CURRENT_VERSION" "$LATEST_VERSION" | sort -V | tail -1)
-  if [ "$HIGHER" = "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+  if is_current_newer_or_equal "$CURRENT_VERSION" "$LATEST_VERSION" && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
     echo "✓ Your version ($CURRENT_VERSION) is newer than available ($LATEST_VERSION). Skipping update."
     exit 0
   fi
@@ -64,10 +104,18 @@ fi
 
 echo "Update required: $CURRENT_VERSION -> $LATEST_VERSION"
 
-echo "Running official installer for $LATEST_VERSION ..."
-# Install the exact version we detected (supports RCs) via upstream installer.
-# Note: The installer may prompt for sudo; this script itself does not handle sudo.
-if ! curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="$LATEST_VERSION" sh; then
+# Download the official installer to a local file
+INSTALLER_PATH="$(dirname "$0")/ollama_install.sh"
+
+echo "Downloading official Ollama installer..."
+if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
+  echo "Failed to download installer." >&2
+  exit 1
+fi
+
+echo "Running installer for version $LATEST_VERSION ..."
+echo "Note: You may be prompted for sudo password."
+if ! OLLAMA_VERSION="$LATEST_VERSION" sh "$INSTALLER_PATH"; then
   echo "Install failed via official installer." >&2
   exit 1
 fi
