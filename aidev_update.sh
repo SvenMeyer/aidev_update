@@ -85,14 +85,14 @@ run_update "$SCRIPT_DIR/gemini_update.sh" "Gemini CLI Update"
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/codex_update.sh" "OpenAI Codex Update"
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/qwen_update.sh" "Qwen Code Update"
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/qwen_update.sh" "Qwen Code Update"
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/amp_update.sh" "Amp Code Update"
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/amp_update.sh" "Amp Code Update"
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/llxprt_update.sh" "LLxprt Code Update"
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/llxprt_update.sh" "LLxprt Code Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/justcode_update.sh" "JustCode Update"
@@ -101,7 +101,11 @@ echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/codebuff_update.sh" "Codebuff Update"
 
 echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
+# run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
+task-master --version
+
+echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/cliproxyapi_update.sh" "CLIProxyAPI Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/ollama_update.sh" "Ollama Update"

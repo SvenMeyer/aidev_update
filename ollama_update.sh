@@ -111,16 +111,45 @@ if ! sudo -v; then
   exit 1
 fi
 
-# Download the official installer to a local file
-INSTALLER_PATH="$(dirname "$0")/ollama_install.sh"
+# Set up caching for the binary bundle
+CACHE_DIR="$(dirname "$0")/.cache"
+BUNDLE_FILE="$CACHE_DIR/ollama-linux-amd64-$LATEST_VERSION.tgz"
 
-echo "Downloading official Ollama installer..."
-if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
-  echo "Failed to download installer." >&2
-  exit 1
+# Create cache directory if it doesn't exist
+mkdir -p "$CACHE_DIR"
+
+# Check if we have the binary bundle cached
+if [ -f "$BUNDLE_FILE" ]; then
+  echo "Using cached binary bundle: $BUNDLE_FILE"
+else
+  echo "Downloading binary bundle to cache..."
+  if ! curl -fsSL "https://ollama.com/download/ollama-linux-amd64.tgz?version=$LATEST_VERSION" -o "$BUNDLE_FILE"; then
+    echo "Failed to download binary bundle." >&2
+    exit 1
+  fi
+  echo "Binary bundle cached at: $BUNDLE_FILE"
 fi
 
-echo "Running installer for version $LATEST_VERSION ..."
+# Create a modified installer that uses the cached bundle
+INSTALLER_PATH="$(dirname "$0")/ollama_install_cached.sh"
+
+# Check if installer exists and is recent, otherwise download it
+if [ ! -f "$INSTALLER_PATH" ] || [ "$(stat -c %Y "$INSTALLER_PATH")" -lt "$(date +%s --date='1 day ago')" ]; then
+  echo "Downloading official Ollama installer..."
+  if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
+    echo "Failed to download installer." >&2
+    exit 1
+  fi
+else
+  echo "Using cached installer script"
+fi
+
+# Modify the installer to use our cached bundle
+sed -i "s|\"https://ollama.com/download/ollama-linux-\${ARCH}\.tgz\${VER_PARAM}\"|\"$BUNDLE_FILE\"|g" "$INSTALLER_PATH"
+sed -i 's/curl --fail --show-error --location --progress-bar \\/cat /g' "$INSTALLER_PATH"
+sed -i '/^[[:space:]]*|\[[:space:]]*\\$/d' "$INSTALLER_PATH"
+
+echo "Running installer for version $LATEST_VERSION using cached bundle..."
 if ! OLLAMA_VERSION="$LATEST_VERSION" sh "$INSTALLER_PATH"; then
   echo "Install failed via official installer." >&2
   exit 1
