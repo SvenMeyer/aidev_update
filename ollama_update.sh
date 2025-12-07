@@ -104,13 +104,6 @@ fi
 
 echo "Update required: $CURRENT_VERSION -> $LATEST_VERSION"
 
-# Request sudo upfront to avoid timeout issues during installation
-echo "Requesting sudo permission (needed for installation)..."
-if ! sudo -v; then
-  echo "Failed to get sudo permission." >&2
-  exit 1
-fi
-
 # Set up caching for the binary bundle
 CACHE_DIR="$(dirname "$0")/.cache"
 BUNDLE_FILE="$CACHE_DIR/ollama-linux-amd64-$LATEST_VERSION.tgz"
@@ -118,10 +111,9 @@ BUNDLE_FILE="$CACHE_DIR/ollama-linux-amd64-$LATEST_VERSION.tgz"
 # Create cache directory if it doesn't exist
 mkdir -p "$CACHE_DIR"
 
-# Check if we have the binary bundle cached
+# Check if we have the binary bundle cached, download if not
 if [ -f "$BUNDLE_FILE" ]; then
-  echo "Using cached binary bundle: $BUNDLE_FILE"
-  echo "Extracting cached bundle..."
+  echo "✓ Using cached binary bundle: $BUNDLE_FILE"
 else
   echo "Downloading binary bundle to cache..."
   if ! curl -fL --progress-bar "https://ollama.com/download/ollama-linux-amd64.tgz?version=$LATEST_VERSION" -o "$BUNDLE_FILE"; then
@@ -131,7 +123,7 @@ else
   echo "✓ Binary bundle cached at: $BUNDLE_FILE"
 fi
 
-# Request sudo AFTER download completes
+# Request sudo AFTER download completes (or if using cache)
 echo "Requesting sudo permission (needed for installation)..."
 if ! sudo -v; then
   echo "Failed to get sudo permission." >&2
@@ -141,17 +133,17 @@ fi
 # Create a modified installer that uses the cached bundle
 INSTALLER_PATH="$(dirname "$0")/ollama_install_cached.sh"
 
-# Download installer if needed
-if [ ! -f "$INSTALLER_PATH" ] || [ "$(stat -c %Y "$INSTALLER_PATH")" -lt "$(date +%s --date='1 day ago')" ]; then
-  echo "Downloading official Ollama installer..."
-  if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
-    echo "Failed to download installer." >&2
-    exit 1
-  fi
+# Always download fresh installer to ensure clean state
+echo "Downloading official Ollama installer..."
+if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
+  echo "Failed to download installer." >&2
+  exit 1
 fi
 
-# Modify installer to use cached bundle - single clean sed command
-sed -i "/curl.*ollama-linux.*\.tgz/,/\$SUDO tar/c\\    \$SUDO tar -xzf \"$BUNDLE_FILE\" -C \"\$OLLAMA_INSTALL_DIR\"" "$INSTALLER_PATH"
+# Modify installer to use cached bundle - replace curl download with tar extraction
+# This replaces the multi-line: curl ... | $SUDO tar ...
+# With single line: $SUDO tar -xzf "$BUNDLE_FILE" ...
+sed -i '/status "Downloading Linux/,/$SUDO tar.*OLLAMA_INSTALL_DIR/c\    $SUDO tar -xzf "'"$BUNDLE_FILE"'" -C "$OLLAMA_INSTALL_DIR"' "$INSTALLER_PATH"
 
 echo "Running installer for version $LATEST_VERSION..."
 if ! OLLAMA_VERSION="$LATEST_VERSION" sh "$INSTALLER_PATH"; then
