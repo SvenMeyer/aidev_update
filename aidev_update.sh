@@ -108,6 +108,9 @@ echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/cliproxyapi_update.sh" "CLIProxyAPI Update"
 
 echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/antigravity_update.sh" "Google Antigravity Update"
+
+echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/ollama_update.sh" "Ollama Update"
 
 echo ""
