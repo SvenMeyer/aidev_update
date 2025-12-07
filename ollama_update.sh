@@ -121,38 +121,48 @@ mkdir -p "$CACHE_DIR"
 # Check if we have the binary bundle cached
 if [ -f "$BUNDLE_FILE" ]; then
   echo "Using cached binary bundle: $BUNDLE_FILE"
+  echo "Extracting cached bundle..."
 else
   echo "Downloading binary bundle to cache..."
-  if ! curl -fsSL "https://ollama.com/download/ollama-linux-amd64.tgz?version=$LATEST_VERSION" -o "$BUNDLE_FILE"; then
+  if ! curl -fL --progress-bar "https://ollama.com/download/ollama-linux-amd64.tgz?version=$LATEST_VERSION" -o "$BUNDLE_FILE"; then
     echo "Failed to download binary bundle." >&2
     exit 1
   fi
-  echo "Binary bundle cached at: $BUNDLE_FILE"
+  echo "✓ Binary bundle cached at: $BUNDLE_FILE"
+fi
+
+# Request sudo AFTER download completes
+echo "Requesting sudo permission (needed for installation)..."
+if ! sudo -v; then
+  echo "Failed to get sudo permission." >&2
+  exit 1
 fi
 
 # Create a modified installer that uses the cached bundle
 INSTALLER_PATH="$(dirname "$0")/ollama_install_cached.sh"
 
-# Check if installer exists and is recent, otherwise download it
+# Download installer if needed
 if [ ! -f "$INSTALLER_PATH" ] || [ "$(stat -c %Y "$INSTALLER_PATH")" -lt "$(date +%s --date='1 day ago')" ]; then
   echo "Downloading official Ollama installer..."
   if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
     echo "Failed to download installer." >&2
     exit 1
   fi
-else
-  echo "Using cached installer script"
 fi
 
-# Modify the installer to use our cached bundle
-sed -i "s|\"https://ollama.com/download/ollama-linux-\${ARCH}\.tgz\${VER_PARAM}\"|\"$BUNDLE_FILE\"|g" "$INSTALLER_PATH"
-sed -i 's/curl --fail --show-error --location --progress-bar \\/cat /g' "$INSTALLER_PATH"
-sed -i '/^[[:space:]]*|\[[:space:]]*\\$/d' "$INSTALLER_PATH"
+# Modify installer to use cached bundle - single clean sed command
+sed -i "/curl.*ollama-linux.*\.tgz/,/\$SUDO tar/c\\    \$SUDO tar -xzf \"$BUNDLE_FILE\" -C \"\$OLLAMA_INSTALL_DIR\"" "$INSTALLER_PATH"
 
-echo "Running installer for version $LATEST_VERSION using cached bundle..."
+echo "Running installer for version $LATEST_VERSION..."
 if ! OLLAMA_VERSION="$LATEST_VERSION" sh "$INSTALLER_PATH"; then
   echo "Install failed via official installer." >&2
   exit 1
 fi
 
 echo "✓ Installed/updated to $LATEST_VERSION"
+
+# Clean up old cached versions (keep only current)
+REMOVED_COUNT=$(find "$CACHE_DIR" -name "ollama-linux-amd64-*.tgz" ! -name "ollama-linux-amd64-$LATEST_VERSION.tgz" -delete -print 2>/dev/null | wc -l)
+if [ "$REMOVED_COUNT" -gt 0 ]; then
+    echo "Cleaned up $REMOVED_COUNT old cached version(s)"
+fi
