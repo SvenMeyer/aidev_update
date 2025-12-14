@@ -2,6 +2,8 @@
 
 A comprehensive update script for managing multiple AI-powered development CLI tools.
 
+> **Note:** This repository has only been tested on "plain" Linux (Manjaro Linux).
+
 ## Overview
 
 `aidev_update.sh` is a unified update manager that keeps your AI development tools up-to-date. It orchestrates updates for various AI coding assistants and related tools through a single command.
@@ -38,8 +40,11 @@ The script will automatically:
 ### External Update Scripts
 - **Claude Code CLI** - `claude_update.sh`
 - **Claude Code Router** - `ccr_update.sh`
+- **CLIProxyAPI** - `cliproxyapi_update.sh`
 - **Gemini CLI** - `gemini_update.sh`
+- **Google Antigravity** - `antigravity_update.sh`
 - **OpenAI Codex** - `codex_update.sh`
+- **OpenSpec** - `openspec_update.sh`
 - **Amp Code** - `amp_update.sh`
 - **Taskmaster** - `tm_update.sh`
 - **Ollama** - `ollama_update.sh`
@@ -48,15 +53,34 @@ The script will automatically:
 
 ```
 aidev_update/
-├── aidev_update.sh        # Main orchestration script
-├── claude_update.sh       # Claude CLI updater
-├── codex_update.sh        # OpenAI Codex updater
-├── ccr_update.sh          # Claude Code Router updater
-├── gemini_update.sh       # Gemini CLI updater
-├── gemini_install.sh      # Gemini CLI installer
-├── amp_update.sh          # Amp Code updater
-├── tm_update.sh           # Taskmaster updater
-└── ollama_update.sh       # Ollama updater
+├── aidev_update.sh             # Main orchestration script
+├── claude_update.sh            # Claude CLI updater
+├── codex_update.sh             # OpenAI Codex updater
+├── ccr_update.sh               # Claude Code Router updater
+├── cliproxyapi_update.sh       # CLIProxyAPI updater
+├── gemini_update.sh            # Gemini CLI updater
+├── gemini_install.sh           # Gemini CLI installer
+├── antigravity_update.sh       # Google Antigravity updater
+├── openspec_update.sh          # OpenSpec updater
+├── amp_update.sh               # Amp Code updater
+├── tm_update.sh                # Taskmaster updater
+├── ollama_update.sh            # Ollama updater
+├── ollama_install.sh           # Ollama installer
+├── ollama_install_cached.sh    # Ollama installer (cached version)
+├── ollama_update_fixed.sh      # Ollama updater (fixed version)
+├── ollama_update_kimi.sh       # Ollama updater (Kimi variant)
+├── ollama_update_optimized.sh  # Ollama updater (optimized version)
+├── codebuff_update.sh          # Codebuff updater
+├── llxprt_update.sh            # llxprt-code updater
+├── opencode_update.sh          # OpenCode CLI updater
+├── justcode_update.sh          # justcode updater
+├── qwen_update.sh              # Qwen Code updater
+├── run_test.sh                 # Test runner
+├── test_kimi.sh                # Kimi variant test
+├── test_new_version.sh         # New version test
+├── test_optimized.sh           # Optimized version test
+├── test_version.sh             # Version test
+└── test_version_comparison.sh  # Version comparison test
 ```
 
 ## Features
