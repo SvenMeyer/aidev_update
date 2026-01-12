@@ -106,21 +106,48 @@ echo "Update required: $CURRENT_VERSION -> $LATEST_VERSION"
 
 # Set up caching for the binary bundle
 CACHE_DIR="$(dirname "$0")/.cache"
-BUNDLE_FILE="$CACHE_DIR/ollama-linux-amd64-$LATEST_VERSION.tgz"
 
 # Create cache directory if it doesn't exist
 mkdir -p "$CACHE_DIR"
+
+# Detect which format is available (.tgz for stable, .tar.zst for pre-releases)
+echo "Detecting available bundle format..."
+if curl -sILf "https://ollama.com/download/ollama-linux-amd64.tgz?version=$LATEST_VERSION" >/dev/null 2>&1; then
+  BUNDLE_EXT="tgz"
+else
+  BUNDLE_EXT="tar.zst"
+fi
+echo "Bundle format: $BUNDLE_EXT"
+
+BUNDLE_FILE="$CACHE_DIR/ollama-linux-amd64-$LATEST_VERSION.$BUNDLE_EXT"
 
 # Check if we have the binary bundle cached, download if not
 if [ -f "$BUNDLE_FILE" ]; then
   echo "✓ Using cached binary bundle: $BUNDLE_FILE"
 else
   echo "Downloading binary bundle to cache..."
-  if ! curl -fL --progress-bar "https://ollama.com/download/ollama-linux-amd64.tgz?version=$LATEST_VERSION" -o "$BUNDLE_FILE"; then
+  if ! curl -fL --progress-bar "https://ollama.com/download/ollama-linux-amd64.$BUNDLE_EXT?version=$LATEST_VERSION" -o "$BUNDLE_FILE"; then
     echo "Failed to download binary bundle." >&2
     exit 1
   fi
   echo "✓ Binary bundle cached at: $BUNDLE_FILE"
+fi
+
+# Ensure zstd is available if using .tar.zst format
+if [ "$BUNDLE_EXT" = "tar.zst" ]; then
+  if ! command -v zstd >/dev/null 2>&1; then
+    echo "Installing zstd for decompression..."
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get install -y zstd
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo pacman -S --noconfirm zstd
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y zstd
+    else
+      echo "Please install zstd manually to extract .tar.zst files." >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Request sudo AFTER download completes (or if using cache)
@@ -142,8 +169,14 @@ fi
 
 # Modify installer to use cached bundle - replace curl download with tar extraction
 # This replaces the multi-line: curl ... | $SUDO tar ...
-# With single line: $SUDO tar -xzf "$BUNDLE_FILE" ...
-sed -i '/status "Downloading Linux/,/$SUDO tar.*OLLAMA_INSTALL_DIR/c\    $SUDO tar -xzf "'"$BUNDLE_FILE"'" -C "$OLLAMA_INSTALL_DIR"' "$INSTALLER_PATH"
+# With appropriate extraction command based on format
+if [ "$BUNDLE_EXT" = "tar.zst" ]; then
+  # Use zstd for .tar.zst files
+  sed -i '/status "Downloading Linux/,/$SUDO tar.*OLLAMA_INSTALL_DIR/c\    zstd -d -c "'"$BUNDLE_FILE"'" | $SUDO tar -x -C "$OLLAMA_INSTALL_DIR"' "$INSTALLER_PATH"
+else
+  # Use tar -xzf for .tgz files
+  sed -i '/status "Downloading Linux/,/$SUDO tar.*OLLAMA_INSTALL_DIR/c\    $SUDO tar -xzf "'"$BUNDLE_FILE"'" -C "$OLLAMA_INSTALL_DIR"' "$INSTALLER_PATH"
+fi
 
 echo "Running installer for version $LATEST_VERSION..."
 if ! OLLAMA_VERSION="$LATEST_VERSION" sh "$INSTALLER_PATH"; then
@@ -154,7 +187,7 @@ fi
 echo "✓ Installed/updated to $LATEST_VERSION"
 
 # Clean up old cached versions (keep only current)
-REMOVED_COUNT=$(find "$CACHE_DIR" -name "ollama-linux-amd64-*.tgz" ! -name "ollama-linux-amd64-$LATEST_VERSION.tgz" -delete -print 2>/dev/null | wc -l)
+REMOVED_COUNT=$(find "$CACHE_DIR" \( -name "ollama-linux-amd64-*.tgz" -o -name "ollama-linux-amd64-*.tar.zst" \) ! -name "ollama-linux-amd64-$LATEST_VERSION.$BUNDLE_EXT" -delete -print 2>/dev/null | wc -l)
 if [ "$REMOVED_COUNT" -gt 0 ]; then
     echo "Cleaned up $REMOVED_COUNT old cached version(s)"
 fi
