@@ -167,19 +167,57 @@ if ! curl -fsSL https://ollama.com/install.sh -o "$INSTALLER_PATH"; then
   exit 1
 fi
 
-# Modify installer to use cached bundle - replace curl download with tar extraction
-# This replaces the multi-line: curl ... | $SUDO tar ...
-# With appropriate extraction command based on format
-if [ "$BUNDLE_EXT" = "tar.zst" ]; then
-  # Use zstd for .tar.zst files
-  sed -i '/status "Downloading Linux/,/$SUDO tar.*OLLAMA_INSTALL_DIR/c\    zstd -d -c "'"$BUNDLE_FILE"'" | $SUDO tar -x -C "$OLLAMA_INSTALL_DIR"' "$INSTALLER_PATH"
-else
-  # Use tar -xzf for .tgz files
-  sed -i '/status "Downloading Linux/,/$SUDO tar.*OLLAMA_INSTALL_DIR/c\    $SUDO tar -xzf "'"$BUNDLE_FILE"'" -C "$OLLAMA_INSTALL_DIR"' "$INSTALLER_PATH"
-fi
+# Modify installer to prefer cached bundle for the main linux archive.
+# The upstream installer now downloads via download_and_extract(), so replace that function.
+BUNDLE_NAME="ollama-linux-amd64"
+sed -i '/^download_and_extract() {/,/^}/c\
+download_and_extract() {\
+    local url_base="$1"\
+    local dest_dir="$2"\
+    local filename="$3"\
+\
+    if [ -n "${OLLAMA_CACHED_BUNDLE:-}" ] && [ -f "$OLLAMA_CACHED_BUNDLE" ] && [ "$filename" = "${OLLAMA_CACHED_BUNDLE_NAME:-}" ]; then\
+        case "$OLLAMA_CACHED_BUNDLE" in\
+            *.tar.zst)\
+                if ! available zstd; then\
+                    error "Cached bundle requires zstd for extraction. Please install zstd and try again."\
+                fi\
+                status "Using cached ${filename}.tar.zst"\
+                zstd -d -c "$OLLAMA_CACHED_BUNDLE" | $SUDO tar -xf - -C "${dest_dir}"\
+                return 0\
+                ;;\
+            *.tgz)\
+                status "Using cached ${filename}.tgz"\
+                $SUDO tar -xzf "$OLLAMA_CACHED_BUNDLE" -C "${dest_dir}"\
+                return 0\
+                ;;\
+        esac\
+    fi\
+\
+    # Fall back to upstream download behavior for other archives (e.g., JetPack).\
+    if curl --fail --silent --head --location "${url_base}/${filename}.tar.zst${VER_PARAM}" >/dev/null 2>&1; then\
+        if ! available zstd; then\
+            error "This version requires zstd for extraction. Please install zstd and try again:\
+  - Debian/Ubuntu: sudo apt-get install zstd\
+  - RHEL/CentOS/Fedora: sudo dnf install zstd\
+  - Arch: sudo pacman -S zstd"\
+        fi\
+        status "Downloading ${filename}.tar.zst"\
+        curl --fail --show-error --location --progress-bar \
+            "${url_base}/${filename}.tar.zst${VER_PARAM}" | \
+            zstd -d | $SUDO tar -xf - -C "${dest_dir}"\
+        return 0\
+    fi\
+\
+    status "Downloading ${filename}.tgz"\
+    curl --fail --show-error --location --progress-bar \
+        "${url_base}/${filename}.tgz${VER_PARAM}" | \
+        $SUDO tar -xzf - -C "${dest_dir}"\
+}\
+' "$INSTALLER_PATH"
 
 echo "Running installer for version $LATEST_VERSION..."
-if ! OLLAMA_VERSION="$LATEST_VERSION" sh "$INSTALLER_PATH"; then
+if ! OLLAMA_VERSION="$LATEST_VERSION" OLLAMA_CACHED_BUNDLE="$BUNDLE_FILE" OLLAMA_CACHED_BUNDLE_NAME="$BUNDLE_NAME" sh "$INSTALLER_PATH"; then
   echo "Install failed via official installer." >&2
   exit 1
 fi
