@@ -1,8 +1,7 @@
 
 #!/bin/bash
 
-# Basic error handling
-set -e
+# Note: We don't use 'set -e' here so that individual update failures don't stop the entire script
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,7 +62,10 @@ echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/openspec_update.sh" "OpenSpec Update"
 
 echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/claude_update.sh" "Claude Code CLI Update"
+# run_update "$SCRIPT_DIR/claude_update.sh" "Claude Code CLI Update"
+
+echo "Claude Code CLI Update"
+claude update
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"

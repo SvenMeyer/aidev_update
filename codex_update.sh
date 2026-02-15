@@ -34,9 +34,16 @@ fi
 echo "Current version:"
 codex --version 2>/dev/null || echo "Not installed"
 
-# Get all versions and select the latest one (including preview/beta/alpha)
+# Get all versions and select the latest linux-x64 version (including preview/beta/alpha)
 echo "Fetching latest version information..."
-LATEST_VERSION=$(retry_command npm view @openai/codex versions --json | jq -r '.[-1]')
+LATEST_VERSION=$(retry_command npm view @openai/codex versions --json | jq -r '.[]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[0-9]+)?)?-linux-x64$' | tail -1)
+
+# Fallback: if no linux-x64 version found, try generic version (no platform suffix)
+if [[ -z "$LATEST_VERSION" ]]; then
+    echo "No linux-x64 specific version found, trying generic version..."
+    LATEST_VERSION=$(retry_command npm view @openai/codex versions --json | jq -r '.[]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[0-9]+)?)?$' | grep -v '\-(win32|darwin|linux)\-' | tail -1)
+fi
+
 echo "Latest version: $LATEST_VERSION"
 
 # Extract version number from current installation
