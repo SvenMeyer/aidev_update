@@ -1,85 +1,56 @@
 #!/bin/bash
 
-# Basic retry function
-retry_command() {
-    local max_attempts=2
-    local attempt=1
+# Install/update OpenAI Codex CLI to the latest alpha (includes pre-releases).
+# Uses the npm dist-tag "alpha" which npm maintains automatically — no manual
+# version scraping needed.
+#
+# Usage: ./codex_update.sh [alpha|latest|beta]   (default: alpha)
 
-    while [ $attempt -le $max_attempts ]; do
-        if "$@"; then
-            return 0
-        else
-            echo "Attempt $attempt failed. Retrying..."
-            ((attempt++))
-            sleep 2
-        fi
-    done
+TAG="${1:-alpha}"
 
-    echo "All attempts failed."
-    return 1
-}
+echo "OpenAI Codex CLI Update Script (tag: $TAG)"
 
-echo "OpenAI Codex CLI Auto-Update Script"
-echo "Installing latest version (including preview/beta/alpha)"
+# Resolve the version that the requested tag points to
+LATEST_VERSION=$(npm view "@openai/codex@$TAG" version 2>/dev/null)
 
-# Check dependencies
-if ! command -v jq >/dev/null 2>&1; then
-    echo "❌ 'jq' is required but not installed. Please install jq and try again."
-    echo "   On Ubuntu/Debian: sudo apt-get install jq"
-    echo "   On macOS: brew install jq"
+if [[ -z "$LATEST_VERSION" ]]; then
+    echo "❌ Could not resolve version for tag '$TAG'. Check: npm show @openai/codex dist-tags"
     exit 1
 fi
 
-# Get current version
-echo "Current version:"
-codex --version 2>/dev/null || echo "Not installed"
+echo "Latest $TAG version : $LATEST_VERSION"
 
-# Get all versions and select the latest linux-x64 version (including preview/beta/alpha)
-echo "Fetching latest version information..."
-LATEST_VERSION=$(retry_command npm view @openai/codex versions --json | jq -r '.[]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[0-9]+)?)?-linux-x64$' | tail -1)
-
-# Fallback: if no linux-x64 version found, try generic version (no platform suffix)
-if [[ -z "$LATEST_VERSION" ]]; then
-    echo "No linux-x64 specific version found, trying generic version..."
-    LATEST_VERSION=$(retry_command npm view @openai/codex versions --json | jq -r '.[]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[0-9]+)?)?$' | grep -v '\-(win32|darwin|linux)\-' | tail -1)
-fi
-
-echo "Latest version: $LATEST_VERSION"
-
-# Extract version number from current installation
-if command -v codex &> /dev/null; then
-    CURRENT_VERSION=$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[0-9]+)?)?' | head -1)
-    echo "Installed version number: $CURRENT_VERSION"
-
+# Check currently installed version
+CURRENT_VERSION=$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -1)
+if [[ -n "$CURRENT_VERSION" ]]; then
+    echo "Installed version   : $CURRENT_VERSION"
     if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
-        echo "OpenAI Codex is already up to date!"
-        echo "-------------------------------------"
+        echo "Already up to date!"
         exit 0
     fi
+else
+    echo "Installed version   : not installed"
 fi
 
-# Install latest version
-echo "Installing @openai/codex@$LATEST_VERSION"
-if retry_command npm install -g "@openai/codex@$LATEST_VERSION"; then
-    # Fix symlink: npm can't auto-create it (no bin field in package.json).
-    # The native binary lives inside a same-named subdirectory, so we must
-    # point the symlink at the file, not the directory.
-    NPM_BIN=$(npm bin -g 2>/dev/null)
-    PKG_DIR=$(npm root -g 2>/dev/null)/@openai/codex
-    VENDOR_BINARY=$(find "$PKG_DIR/vendor" -maxdepth 3 -type f -name "codex" 2>/dev/null | head -1)
-
-    if [[ -n "$VENDOR_BINARY" && -x "$VENDOR_BINARY" ]]; then
-        ln -sf "$VENDOR_BINARY" "$NPM_BIN/codex"
-        echo "✓ Symlink fixed: $NPM_BIN/codex -> $VENDOR_BINARY"
-    else
-        echo "⚠ Could not locate codex binary under $PKG_DIR/vendor — symlink not updated."
-    fi
-
-    # Verify installation
-    echo "Updated version:"
-    codex --version
-    echo "✓ OpenAI Codex update completed successfully!"
-else
-    echo "❌ OpenAI Codex update failed!"
+# Install
+echo "Installing @openai/codex@$LATEST_VERSION ..."
+if ! npm install -g "@openai/codex@$LATEST_VERSION"; then
+    echo "❌ Installation failed!"
     exit 1
 fi
+
+# Fix symlink: the package has no bin field so npm cannot create it automatically.
+# The native binary sits inside a same-named subdirectory (vendor/.../codex/codex).
+NPM_BIN=$(npm bin -g 2>/dev/null)
+PKG_DIR=$(npm root -g 2>/dev/null)/@openai/codex
+VENDOR_BINARY=$(find "$PKG_DIR/vendor" -maxdepth 3 -type f -name "codex" 2>/dev/null | head -1)
+
+if [[ -n "$VENDOR_BINARY" && -x "$VENDOR_BINARY" ]]; then
+    ln -sf "$VENDOR_BINARY" "$NPM_BIN/codex"
+    echo "✓ Symlink: $NPM_BIN/codex -> $VENDOR_BINARY"
+else
+    echo "⚠ Could not find codex binary under $PKG_DIR/vendor — symlink not updated."
+fi
+
+echo "Installed version   : $(codex --version 2>/dev/null || echo 'unknown')"
+echo "✓ Done!"
