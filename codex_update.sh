@@ -61,6 +61,20 @@ fi
 # Install latest version
 echo "Installing @openai/codex@$LATEST_VERSION"
 if retry_command npm install -g "@openai/codex@$LATEST_VERSION"; then
+    # Fix symlink: npm can't auto-create it (no bin field in package.json).
+    # The native binary lives inside a same-named subdirectory, so we must
+    # point the symlink at the file, not the directory.
+    NPM_BIN=$(npm bin -g 2>/dev/null)
+    PKG_DIR=$(npm root -g 2>/dev/null)/@openai/codex
+    VENDOR_BINARY=$(find "$PKG_DIR/vendor" -maxdepth 3 -type f -name "codex" 2>/dev/null | head -1)
+
+    if [[ -n "$VENDOR_BINARY" && -x "$VENDOR_BINARY" ]]; then
+        ln -sf "$VENDOR_BINARY" "$NPM_BIN/codex"
+        echo "✓ Symlink fixed: $NPM_BIN/codex -> $VENDOR_BINARY"
+    else
+        echo "⚠ Could not locate codex binary under $PKG_DIR/vendor — symlink not updated."
+    fi
+
     # Verify installation
     echo "Updated version:"
     codex --version
