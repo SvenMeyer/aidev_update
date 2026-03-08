@@ -39,17 +39,20 @@ if ! npm install -g "@openai/codex@$LATEST_VERSION"; then
     exit 1
 fi
 
-# Fix symlink: the package has no bin field so npm cannot create it automatically.
-# The native binary sits inside a same-named subdirectory (vendor/.../codex/codex).
-NPM_BIN=$(npm bin -g 2>/dev/null)
-PKG_DIR=$(npm root -g 2>/dev/null)/@openai/codex
-VENDOR_BINARY=$(find "$PKG_DIR/vendor" -maxdepth 3 -type f -name "codex" 2>/dev/null | head -1)
+# Older package versions had no bin field so npm couldn't create the symlink.
+# If codex is still not callable, find the native binary and link it manually.
+if ! command -v codex &>/dev/null; then
+    NPM_BIN=$(npm bin -g 2>/dev/null)
+    PKG_DIR=$(npm root -g 2>/dev/null)/@openai/codex
+    VENDOR_BINARY=$(find "$PKG_DIR" -maxdepth 5 -type f -name "codex" 2>/dev/null | head -1)
 
-if [[ -n "$VENDOR_BINARY" && -x "$VENDOR_BINARY" ]]; then
-    ln -sf "$VENDOR_BINARY" "$NPM_BIN/codex"
-    echo "✓ Symlink: $NPM_BIN/codex -> $VENDOR_BINARY"
-else
-    echo "⚠ Could not find codex binary under $PKG_DIR/vendor — symlink not updated."
+    if [[ -n "$VENDOR_BINARY" && -x "$VENDOR_BINARY" ]]; then
+        ln -sf "$VENDOR_BINARY" "$NPM_BIN/codex"
+        echo "✓ Symlink fixed: $NPM_BIN/codex -> $VENDOR_BINARY"
+    else
+        echo "❌ Could not find codex binary — manual intervention required."
+        exit 1
+    fi
 fi
 
 echo "Installed version   : $(codex --version 2>/dev/null || echo 'unknown')"
