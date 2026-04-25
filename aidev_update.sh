@@ -96,11 +96,11 @@ run_update "$SCRIPT_DIR/codex_update.sh" "OpenAI Codex Update"
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/llxprt_update.sh" "LLxprt Code Update"
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/justcode_update.sh" "JustCode Update"
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/justcode_update.sh" "JustCode Update"
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/codebuff_update.sh" "Codebuff Update"
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/codebuff_update.sh" "Codebuff Update"
 
 echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
@@ -113,7 +113,10 @@ echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/antigravity_update.sh" "Google Antigravity Update"
 
 echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/ollama_update.sh" "Ollama Update"
+run_update "$SCRIPT_DIR/headroom_update.sh" "Headroom Update"
+
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/ollama_update.sh" "Ollama Update"
 
 echo ""
 echo "====================================="
