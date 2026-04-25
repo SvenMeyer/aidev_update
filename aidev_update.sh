@@ -68,6 +68,10 @@ echo "Claude Code CLI Update"
 claude update
 
 echo "------------------------------------------------------------"
+echo "DROID CLI Update"
+droid update
+
+echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
 
 echo "------------------------------------------------------------"
@@ -103,7 +107,7 @@ run_update "$SCRIPT_DIR/codex_update.sh" "OpenAI Codex Update"
 # run_update "$SCRIPT_DIR/codebuff_update.sh" "Codebuff Update"
 
 echo "------------------------------------------------------------"
-# run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
+run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
 task-master --version
 
 echo "------------------------------------------------------------"
@@ -111,6 +115,9 @@ run_update "$SCRIPT_DIR/cliproxyapi_update.sh" "CLIProxyAPI Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/antigravity_update.sh" "Google Antigravity Update"
+
+echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/entire_update.sh" "Entire Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/headroom_update.sh" "Headroom Update"
