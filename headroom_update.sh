@@ -1,5 +1,5 @@
 #!/bin/bash
-set -eo pipefail
+set -euo pipefail
 
 # Headroom AI update script
 # https://github.com/chopratejas/headroom/releases
@@ -9,9 +9,12 @@ set -eo pipefail
 #   ./headroom_update.sh --override-version X.Y.Z  # force install a specific version
 #   ./headroom_update.sh --kill-port-owner          # allow killing non-headroom process on 8787
 
+HEADROOM_HOST="127.0.0.1"
 HEADROOM_PORT=8787
 HEADROOM_REPO="chopratejas/headroom"
 DEPLOY_ROOT="${HOME}/.headroom/deploy"
+HEALTH_CHECK_ATTEMPTS=12
+HEALTH_CHECK_INTERVAL=5
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -19,10 +22,26 @@ DEPLOY_ROOT="${HOME}/.headroom/deploy"
 OVERRIDE_VERSION=""
 KILL_PORT_OWNER=false
 
+normalize_version() {
+    local version="${1#v}"
+    if [[ "$version" =~ ^([0-9]+\.){2}[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+        printf '%s\n' "$version"
+        return 0
+    fi
+    return 1
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --override-version)
-            OVERRIDE_VERSION="$2"
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                echo "Missing value for --override-version" >&2
+                exit 1
+            fi
+            if ! OVERRIDE_VERSION=$(normalize_version "$2"); then
+                echo "Invalid override version: $2" >&2
+                exit 1
+            fi
             shift 2
             ;;
         --kill-port-owner)
@@ -46,19 +65,31 @@ retry_command() {
     while (( attempt <= max_attempts )); do
         if "$@"; then
             return 0
-        else
-            echo "Attempt $attempt failed. Retrying..." >&2
-            ((attempt++))
-            sleep 2
         fi
+        echo "Attempt $attempt failed. Retrying..." >&2
+        ((attempt++))
+        sleep 2
     done
     echo "All attempts failed." >&2
     return 1
 }
 
+require_commands() {
+    local cmd
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo "❌ '$cmd' is required but not installed." >&2
+            exit 1
+        fi
+    done
+}
+
 # Extract semver from version output (handles "headroom, version X.Y.Z")
 extract_version() {
-    echo "$1" | grep -oE '([0-9]+\.){2}[0-9]+(-[0-9A-Za-z.]+)?' | head -1 || true
+    local version
+    version=$(echo "$1" | grep -oE '([0-9]+\.){2}[0-9]+(-[0-9A-Za-z.]+)?' | head -1 || true)
+    [[ -n "$version" ]] || return 0
+    normalize_version "$version" || true
 }
 
 # Get the latest release version from GitHub API (primary)
@@ -66,62 +97,93 @@ extract_version() {
 get_latest_version() {
     local ver=""
 
-    # Primary: GitHub API
-    ver=$(curl -s "https://api.github.com/repos/${HEADROOM_REPO}/releases/latest" 2>/dev/null \
-        | grep -o '"tag_name": "[^"]*' \
-        | sed -E 's/"tag_name": "v?//' || true)
-
+    ver=$(curl -fsSL "https://api.github.com/repos/${HEADROOM_REPO}/releases/latest" 2>/dev/null \
+        | python3 -c 'import json,sys; print((json.load(sys.stdin).get("tag_name") or "").lstrip("v"))' 2>/dev/null \
+        || true)
+    ver=$(normalize_version "$ver" 2>/dev/null || true)
     if [[ -n "$ver" ]]; then
         echo "$ver"
         return 0
     fi
 
-    # Fallback: scrape HTML releases page
-    ver=$(curl -sL "https://github.com/${HEADROOM_REPO}/releases" 2>/dev/null \
+    ver=$(curl -fsSL "https://github.com/${HEADROOM_REPO}/releases" 2>/dev/null \
         | grep -oE '/releases/tag/v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' \
         | head -1 \
         | sed -E 's|.*/tag/v?||' || true)
-
+    ver=$(normalize_version "$ver" 2>/dev/null || true)
     if [[ -n "$ver" ]]; then
         echo "$ver"
         return 0
     fi
 
-    echo ""
     return 1
 }
 
 # Find deployment profiles that use HEADROOM_PORT
 find_profiles_on_port() {
     local port="$1"
-    local profiles=()
     if [[ -d "$DEPLOY_ROOT" ]]; then
         for manifest in "$DEPLOY_ROOT"/*/manifest.json; do
             [[ -f "$manifest" ]] || continue
-            manifest_port=$(python3 -c "
-import json, sys
-with open('$manifest') as f:
-    d = json.load(f)
-print(d.get('port', ''))
-" 2>/dev/null || true)
-            if [[ "$manifest_port" == "$port" ]]; then
-                profile_name=$(python3 -c "
+            python3 - "$manifest" "$port" <<'PY' 2>/dev/null || true
 import json
-with open('$manifest') as f:
-    d = json.load(f)
-print(d.get('profile', ''))
-" 2>/dev/null || true)
-                [[ -n "$profile_name" ]] && profiles+=("$profile_name")
-            fi
+import sys
+
+manifest_path, target_port = sys.argv[1], sys.argv[2]
+with open(manifest_path) as f:
+    data = json.load(f)
+
+if str(data.get("port", "")) == target_port:
+    print(f"{data.get('updated_at', '')}\t{data.get('profile', '')}\t{data.get('health_url', '')}")
+PY
         done
     fi
-    printf '%s\n' "${profiles[@]}"
 }
 
 # Get PID of the process listening on a given port (tcp, IPv4)
 get_port_owner() {
     local port="$1"
     lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $1, $2; exit}' || true
+}
+
+is_healthy_response() {
+    python3 -c 'import json, sys; d=json.load(sys.stdin); status=str(d.get("status", "")).lower(); ready=str(d.get("ready", "")).lower(); sys.exit(0 if status == "healthy" or ready == "true" else 1)' \
+        2>/dev/null
+}
+
+wait_for_health() {
+    local response=""
+    local url=""
+    local attempt=1
+    local -a urls=("$@")
+
+    while (( attempt <= HEALTH_CHECK_ATTEMPTS )); do
+        for url in "${urls[@]}"; do
+            [[ -n "$url" ]] || continue
+            response=$(curl -fsSL "$url" 2>/dev/null || true)
+            if [[ -n "$response" ]] && is_healthy_response <<<"$response"; then
+                printf '%s\n' "$url"
+                return 0
+            fi
+        done
+        if (( attempt == HEALTH_CHECK_ATTEMPTS )); then
+            break
+        fi
+        ((attempt++))
+        sleep "$HEALTH_CHECK_INTERVAL"
+    done
+
+    return 1
+}
+
+start_direct_proxy() {
+    local log_dir="${HOME}/.headroom/logs"
+    local log_file="${log_dir}/proxy.log"
+
+    mkdir -p "$log_dir"
+    echo "Starting headroom proxy in background (log: $log_file)..."
+    nohup headroom proxy >"$log_file" 2>&1 &
+    echo "Proxy PID: $!"
 }
 
 # ---------------------------------------------------------------------------
@@ -131,12 +193,12 @@ get_port_owner() {
 echo "Headroom Update"
 
 # Check dependencies
-for cmd in pipx curl headroom; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "❌ '$cmd' is required but not installed." >&2
-        exit 1
-    fi
-done
+require_commands pipx curl python3 lsof
+
+HEADROOM_AVAILABLE=false
+if command -v headroom >/dev/null 2>&1; then
+    HEADROOM_AVAILABLE=true
+fi
 
 # --- Resolve target version ------------------------------------------------
 if [[ -n "$OVERRIDE_VERSION" ]]; then
@@ -153,7 +215,10 @@ else
 fi
 
 # --- Detect current version ------------------------------------------------
-CURRENT_VERSION_RAW=$(headroom --version 2>/dev/null || true)
+CURRENT_VERSION_RAW=""
+if [[ "$HEADROOM_AVAILABLE" == "true" ]]; then
+    CURRENT_VERSION_RAW=$(headroom --version 2>/dev/null || true)
+fi
 CURRENT_VERSION=$(extract_version "$CURRENT_VERSION_RAW")
 echo "Current version: ${CURRENT_VERSION:-not installed}"
 
@@ -177,19 +242,32 @@ echo "Update required: ${CURRENT_VERSION:-not installed} -> $LATEST_VERSION"
 
 # 1) Try manifest-backed stop for each profile on the port
 PROFILES=()
-while IFS= read -r p; do
-    [[ -n "$p" ]] && PROFILES+=("$p")
+PRIMARY_PROFILE=""
+PRIMARY_HEALTH_URL=""
+PRIMARY_UPDATED_AT=""
+while IFS=$'\t' read -r updated_at profile health_url; do
+    [[ -n "$profile" ]] || continue
+    PROFILES+=("$profile")
+    if [[ -z "$PRIMARY_PROFILE" || "$updated_at" > "$PRIMARY_UPDATED_AT" ]]; then
+        PRIMARY_PROFILE="$profile"
+        PRIMARY_HEALTH_URL="$health_url"
+        PRIMARY_UPDATED_AT="$updated_at"
+    fi
 done < <(find_profiles_on_port "$HEADROOM_PORT")
 
 if [[ ${#PROFILES[@]} -gt 1 ]]; then
     echo "⚠ Multiple deployment profiles on port $HEADROOM_PORT: ${PROFILES[*]}"
-    echo "  Stopping all of them."
+    echo "  Stopping all of them and restarting the newest profile: $PRIMARY_PROFILE"
 fi
 
-for profile in "${PROFILES[@]}"; do
-    echo "Stopping manifest profile '$profile'..."
-    headroom install stop --profile "$profile" 2>/dev/null || true
-done
+if [[ "$HEADROOM_AVAILABLE" == "true" ]]; then
+    for profile in "${PROFILES[@]}"; do
+        echo "Stopping manifest profile '$profile'..."
+        headroom install stop --profile "$profile" 2>/dev/null || true
+    done
+elif [[ ${#PROFILES[@]} -gt 0 ]]; then
+    echo "⚠ Found manifest profiles, but 'headroom' is not currently on PATH. Skipping manifest stop step." >&2
+fi
 
 # 2) Kill any remaining headroom process on the port
 PORT_OWNER=$(get_port_owner "$HEADROOM_PORT")
@@ -238,62 +316,51 @@ if ! retry_command pipx install "headroom-ai[all]==${LATEST_VERSION}" --force --
     exit 1
 fi
 
+if ! command -v headroom >/dev/null 2>&1; then
+    echo "❌ Installation finished, but 'headroom' is not on PATH." >&2
+    exit 1
+fi
+
 echo "Syncing MCP configuration..."
 headroom mcp install --force || {
     echo "⚠ headroom mcp install --force failed (non-fatal, continuing)" >&2
 }
 
-echo "Installed version: $(headroom --version 2>/dev/null || echo 'unknown')"
+INSTALLED_VERSION_RAW=$(headroom --version 2>/dev/null || true)
+INSTALLED_VERSION=$(extract_version "$INSTALLED_VERSION_RAW")
+echo "Installed version: ${INSTALLED_VERSION_RAW:-unknown}"
+if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" != "$LATEST_VERSION" ]]; then
+    echo "❌ Installed version mismatch: expected $LATEST_VERSION, got $INSTALLED_VERSION" >&2
+    exit 1
+fi
 
 # --- Restart proxy in background --------------------------------------------
 
-# Determine how to restart:
-# - If we had exactly one profile, restart it via headroom install start
-# - Otherwise, launch headroom proxy directly in the background
-RESTART_PROFILE=""
-if [[ ${#PROFILES[@]} -eq 1 ]]; then
-    RESTART_PROFILE="${PROFILES[0]}"
-fi
-
-if [[ -n "$RESTART_PROFILE" ]]; then
-    echo "Restarting manifest profile '$RESTART_PROFILE' in background..."
-    headroom install start --profile "$RESTART_PROFILE" 2>/dev/null || {
-        echo "⚠ headroom install start failed, falling back to direct proxy launch" >&2
-        RESTART_PROFILE=""
-    }
-fi
-
-if [[ -z "$RESTART_PROFILE" ]]; then
-    LOG_DIR="${HOME}/.headroom/logs"
-    mkdir -p "$LOG_DIR"
-    LOG_FILE="$LOG_DIR/proxy.log"
-    echo "Starting headroom proxy in background (log: $LOG_FILE)..."
-    nohup headroom proxy >"$LOG_FILE" 2>&1 &
-    PROXY_PID=$!
-    echo "Proxy PID: $PROXY_PID"
+if [[ -n "$PRIMARY_PROFILE" ]]; then
+    echo "Restarting manifest profile '$PRIMARY_PROFILE' in background..."
+    if ! headroom install start --profile "$PRIMARY_PROFILE" 2>/dev/null; then
+        echo "❌ Failed to restart manifest profile '$PRIMARY_PROFILE'." >&2
+        exit 1
+    fi
+else
+    start_direct_proxy
 fi
 
 # --- Health check (12 × 5s = 60s max) -------------------------------------
 echo "Waiting for proxy health on port $HEADROOM_PORT..."
-HEALTH_OK=false
-for i in $(seq 1 12); do
-    RESPONSE=$(curl -s "http://localhost:${HEADROOM_PORT}/health" 2>/dev/null || true)
-    if [[ -n "$RESPONSE" ]]; then
-        STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || true)
-        READY=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ready',''))" 2>/dev/null || true)
-        if [[ "$STATUS" == "healthy" ]] || [[ "$READY" == "True" ]] || [[ "$READY" == "true" ]]; then
-            HEALTH_OK=true
-            break
-        fi
-    fi
-    sleep 5
-done
+HEALTH_URLS=(
+    "$PRIMARY_HEALTH_URL"
+    "http://${HEADROOM_HOST}:${HEADROOM_PORT}/health"
+    "http://${HEADROOM_HOST}:${HEADROOM_PORT}/readyz"
+    "http://localhost:${HEADROOM_PORT}/health"
+    "http://localhost:${HEADROOM_PORT}/readyz"
+)
 
-if [[ "$HEALTH_OK" == "true" ]]; then
-    echo "✓ Proxy is healthy (http://localhost:${HEADROOM_PORT}/health)"
+if HEALTH_URL=$(wait_for_health "${HEALTH_URLS[@]}"); then
+    echo "✓ Proxy is healthy ($HEALTH_URL)"
 else
     echo "⚠ Proxy did not report healthy within 60s. Check logs at ${HOME}/.headroom/logs/" >&2
     exit 1
 fi
 
-echo "✓ Headroom update completed ($CURRENT_VERSION -> $LATEST_VERSION)"
+echo "✓ Headroom update completed (${CURRENT_VERSION:-not installed} -> $LATEST_VERSION)"
