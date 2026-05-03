@@ -223,16 +223,18 @@ CURRENT_VERSION=$(extract_version "$CURRENT_VERSION_RAW")
 echo "Current version: ${CURRENT_VERSION:-not installed}"
 
 # --- Version comparison -----------------------------------------------------
-if [[ -n "$CURRENT_VERSION" && -n "$LATEST_VERSION" ]]; then
-    if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
-        echo "✓ Headroom already up to date ($CURRENT_VERSION)"
-        exit 0
-    fi
-    # Is current newer than latest? (e.g. local dev build)
-    if [[ "$(printf '%s\n%s\n' "$CURRENT_VERSION" "$LATEST_VERSION" | sort -V | tail -1)" == "$CURRENT_VERSION" ]] \
-        && [[ "$CURRENT_VERSION" != "$LATEST_VERSION" ]]; then
-        echo "✓ Installed version ($CURRENT_VERSION) is newer than latest ($LATEST_VERSION). Skipping."
-        exit 0
+if [[ -z "$OVERRIDE_VERSION" ]]; then
+    if [[ -n "$CURRENT_VERSION" && -n "$LATEST_VERSION" ]]; then
+        if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
+            echo "✓ Headroom already up to date ($CURRENT_VERSION)"
+            exit 0
+        fi
+        # Is current newer than latest? (e.g. local dev build)
+        if [[ "$(printf '%s\n%s\n' "$CURRENT_VERSION" "$LATEST_VERSION" | sort -V | tail -1)" == "$CURRENT_VERSION" ]] \
+            && [[ "$CURRENT_VERSION" != "$LATEST_VERSION" ]]; then
+            echo "✓ Installed version ($CURRENT_VERSION) is newer than latest ($LATEST_VERSION). Skipping."
+            exit 0
+        fi
     fi
 fi
 
