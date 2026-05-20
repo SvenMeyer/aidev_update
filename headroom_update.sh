@@ -12,7 +12,11 @@ set -euo pipefail
 HEADROOM_HOST="127.0.0.1"
 HEADROOM_PORT=8787
 HEADROOM_REPO="chopratejas/headroom"
+HEADROOM_PACKAGE="headroom-ai"
+HEADROOM_FULL_EXTRAS="all"
+HEADROOM_FALLBACK_EXTRAS="benchmark,code,evals,html,mcp,memory,ml,otel,proxy,relevance,reports,voice"
 DEPLOY_ROOT="${HOME}/.headroom/deploy"
+PIPX_VENV_DIR="${PIPX_HOME:-${HOME}/.local/share/pipx}/venvs/${HEADROOM_PACKAGE}"
 HEALTH_CHECK_ATTEMPTS=12
 HEALTH_CHECK_INTERVAL=5
 
@@ -82,6 +86,147 @@ require_commands() {
             exit 1
         fi
     done
+}
+
+resolve_headroom_bin() {
+    local candidate=""
+    for candidate in \
+        "${HEADROOM_BIN:-}" \
+        "$(command -v headroom 2>/dev/null || true)" \
+        "${HOME}/.local/bin/headroom" \
+        "${PIPX_VENV_DIR}/bin/headroom"; do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+refresh_headroom_bin() {
+    HEADROOM_BIN=$(resolve_headroom_bin || true)
+}
+
+get_existing_pipx_python() {
+    local metadata_file="${PIPX_VENV_DIR}/pipx_metadata.json"
+    [[ -f "$metadata_file" ]] || return 0
+    python3 - "$metadata_file" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+path = (data.get("source_interpreter") or {}).get("__Path__", "")
+if path:
+    print(path)
+PY
+}
+
+get_pipx_default_python() {
+    pipx environment 2>/dev/null | awk -F= '/^PIPX_DEFAULT_PYTHON=/{print $2; exit}' || true
+}
+
+emit_python_candidates() {
+    local existing_python=""
+    local default_python=""
+    local candidate=""
+    declare -A seen=()
+
+    existing_python=$(get_existing_pipx_python)
+    default_python=$(get_pipx_default_python)
+
+    for candidate in \
+        "$default_python" \
+        "$existing_python" \
+        /usr/bin/python3.13 \
+        /usr/bin/python3.12 \
+        /usr/bin/python3.11 \
+        /usr/bin/python3.10 \
+        /usr/bin/python3; do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        [[ -n "${seen[$candidate]:-}" ]] && continue
+        seen["$candidate"]=1
+        printf '%s\n' "$candidate"
+    done
+}
+
+python_version_label() {
+    "$1" --version 2>&1 | awk '{print $2}'
+}
+
+PROBE_INSTALL_ERROR=""
+probe_headroom_install() {
+    local python_bin="$1"
+    local install_spec="$2"
+    local tmp_dir=""
+    local log_file=""
+
+    tmp_dir=$(mktemp -d)
+    log_file="${tmp_dir}/probe.log"
+
+    if ! "$python_bin" -m venv "${tmp_dir}/venv" >"$log_file" 2>&1; then
+        PROBE_INSTALL_ERROR=$(tail -n 20 "$log_file" 2>/dev/null || true)
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! "${tmp_dir}/venv/bin/pip" install --upgrade pip >>"$log_file" 2>&1; then
+        PROBE_INSTALL_ERROR=$(tail -n 20 "$log_file" 2>/dev/null || true)
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! "${tmp_dir}/venv/bin/pip" install "$install_spec" >>"$log_file" 2>&1; then
+        PROBE_INSTALL_ERROR=$(tail -n 20 "$log_file" 2>/dev/null || true)
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! "${tmp_dir}/venv/bin/headroom" --version >>"$log_file" 2>&1; then
+        PROBE_INSTALL_ERROR=$(tail -n 20 "$log_file" 2>/dev/null || true)
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    rm -rf "$tmp_dir"
+    return 0
+}
+
+SELECTED_INSTALL_PYTHON=""
+SELECTED_INSTALL_SPEC=""
+USED_INSTALL_FALLBACK=false
+select_install_plan() {
+    local python_bin=""
+    local install_spec=""
+    local last_probe_context=""
+    local -a install_specs=(
+        "${HEADROOM_PACKAGE}[${HEADROOM_FULL_EXTRAS}]==${LATEST_VERSION}"
+        "${HEADROOM_PACKAGE}[${HEADROOM_FALLBACK_EXTRAS}]==${LATEST_VERSION}"
+    )
+
+    while IFS= read -r python_bin; do
+        [[ -n "$python_bin" ]] || continue
+        for install_spec in "${install_specs[@]}"; do
+            echo "Probing install spec '$install_spec' with Python $(python_version_label "$python_bin")..."
+            if probe_headroom_install "$python_bin" "$install_spec"; then
+                SELECTED_INSTALL_PYTHON="$python_bin"
+                SELECTED_INSTALL_SPEC="$install_spec"
+                if [[ "$install_spec" == "${install_specs[0]}" ]]; then
+                    USED_INSTALL_FALLBACK=false
+                else
+                    USED_INSTALL_FALLBACK=true
+                fi
+                return 0
+            fi
+            last_probe_context="Python: ${python_bin} ($(python_version_label "$python_bin"))"$'\n'"Spec: ${install_spec}"$'\n'"${PROBE_INSTALL_ERROR}"
+        done
+    done < <(emit_python_candidates)
+
+    if [[ -n "$last_probe_context" ]]; then
+        echo "Last probe failure:" >&2
+        printf '%s\n' "$last_probe_context" >&2
+    fi
+    return 1
 }
 
 # Extract semver from version output (handles "headroom, version X.Y.Z")
@@ -180,9 +325,17 @@ start_direct_proxy() {
     local log_dir="${HOME}/.headroom/logs"
     local log_file="${log_dir}/proxy.log"
 
+    if [[ -z "${HEADROOM_BIN:-}" ]]; then
+        refresh_headroom_bin
+    fi
+    if [[ -z "${HEADROOM_BIN:-}" ]]; then
+        echo "❌ 'headroom' CLI not found after install." >&2
+        return 1
+    fi
+
     mkdir -p "$log_dir"
     echo "Starting headroom proxy in background (log: $log_file)..."
-    nohup headroom proxy >"$log_file" 2>&1 &
+    nohup "$HEADROOM_BIN" proxy >"$log_file" 2>&1 &
     echo "Proxy PID: $!"
 }
 
@@ -196,7 +349,9 @@ echo "Headroom Update"
 require_commands pipx curl python3 lsof
 
 HEADROOM_AVAILABLE=false
-if command -v headroom >/dev/null 2>&1; then
+HEADROOM_BIN=""
+refresh_headroom_bin
+if [[ -n "$HEADROOM_BIN" ]]; then
     HEADROOM_AVAILABLE=true
 fi
 
@@ -217,7 +372,7 @@ fi
 # --- Detect current version ------------------------------------------------
 CURRENT_VERSION_RAW=""
 if [[ "$HEADROOM_AVAILABLE" == "true" ]]; then
-    CURRENT_VERSION_RAW=$(headroom --version 2>/dev/null || true)
+    CURRENT_VERSION_RAW=$("$HEADROOM_BIN" --version 2>/dev/null || true)
 fi
 CURRENT_VERSION=$(extract_version "$CURRENT_VERSION_RAW")
 echo "Current version: ${CURRENT_VERSION:-not installed}"
@@ -239,6 +394,22 @@ if [[ -z "$OVERRIDE_VERSION" ]]; then
 fi
 
 echo "Update required: ${CURRENT_VERSION:-not installed} -> $LATEST_VERSION"
+
+# --- Stop secondary instances (e.g. Azure proxy on :8788) ------------------
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+AZURE_STOP_SCRIPT="${SCRIPT_DIR}/headroom_azure_stop.sh"
+AZURE_START_SCRIPT="${SCRIPT_DIR}/headroom_azure_start.sh"
+AZURE_PORT=8788
+RESTART_AZURE=false
+
+if [[ -x "$AZURE_STOP_SCRIPT" ]] && lsof -nP -iTCP:"$AZURE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Stopping Azure proxy on port ${AZURE_PORT}..."
+    if "$AZURE_STOP_SCRIPT"; then
+        RESTART_AZURE=true
+    else
+        echo "⚠ Azure proxy stop failed; will not auto-restart it after update." >&2
+    fi
+fi
 
 # --- Stop Headroom ----------------------------------------------------------
 
@@ -265,7 +436,7 @@ fi
 if [[ "$HEADROOM_AVAILABLE" == "true" ]]; then
     for profile in "${PROFILES[@]}"; do
         echo "Stopping manifest profile '$profile'..."
-        headroom install stop --profile "$profile" 2>/dev/null || true
+        "$HEADROOM_BIN" install stop --profile "$profile" 2>/dev/null || true
     done
 elif [[ ${#PROFILES[@]} -gt 0 ]]; then
     echo "⚠ Found manifest profiles, but 'headroom' is not currently on PATH. Skipping manifest stop step." >&2
@@ -312,23 +483,42 @@ fi
 echo "✓ Port $HEADROOM_PORT is free"
 
 # --- Install / Upgrade -----------------------------------------------------
-echo "Installing headroom-ai[all]==${LATEST_VERSION} via pipx..."
-if ! retry_command pipx install "headroom-ai[all]==${LATEST_VERSION}" --force --pip-args="--ignore-requires-python"; then
+echo "Selecting compatible Headroom install plan..."
+if ! select_install_plan; then
+    echo "❌ Could not find a compatible Python/install-spec combination for Headroom ${LATEST_VERSION}" >&2
+    exit 1
+fi
+
+echo "Selected Python: ${SELECTED_INSTALL_PYTHON} ($(python_version_label "$SELECTED_INSTALL_PYTHON"))"
+echo "Selected install spec: ${SELECTED_INSTALL_SPEC}"
+if [[ "$USED_INSTALL_FALLBACK" == "true" ]]; then
+    echo "⚠ Falling back from [all] to a broad install without the broken 'image' extra."
+fi
+
+if pipx list 2>/dev/null | grep -q "package ${HEADROOM_PACKAGE} "; then
+    echo "Removing existing pipx package '${HEADROOM_PACKAGE}' before reinstall..."
+    pipx uninstall "${HEADROOM_PACKAGE}" >/dev/null 2>&1 || true
+fi
+
+echo "Installing ${SELECTED_INSTALL_SPEC} via pipx..."
+if ! retry_command pipx install --python "${SELECTED_INSTALL_PYTHON}" "${SELECTED_INSTALL_SPEC}"; then
     echo "❌ pipx install failed" >&2
     exit 1
 fi
 
-if ! command -v headroom >/dev/null 2>&1; then
-    echo "❌ Installation finished, but 'headroom' is not on PATH." >&2
+refresh_headroom_bin
+if [[ -z "$HEADROOM_BIN" ]]; then
+    echo "❌ Installation finished, but 'headroom' could not be located." >&2
     exit 1
 fi
+HEADROOM_AVAILABLE=true
 
 echo "Syncing MCP configuration..."
-headroom mcp install --force || {
+"$HEADROOM_BIN" mcp install --force || {
     echo "⚠ headroom mcp install --force failed (non-fatal, continuing)" >&2
 }
 
-INSTALLED_VERSION_RAW=$(headroom --version 2>/dev/null || true)
+INSTALLED_VERSION_RAW=$("$HEADROOM_BIN" --version 2>/dev/null || true)
 INSTALLED_VERSION=$(extract_version "$INSTALLED_VERSION_RAW")
 echo "Installed version: ${INSTALLED_VERSION_RAW:-unknown}"
 if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" != "$LATEST_VERSION" ]]; then
@@ -340,7 +530,7 @@ fi
 
 if [[ -n "$PRIMARY_PROFILE" ]]; then
     echo "Restarting manifest profile '$PRIMARY_PROFILE' in background..."
-    if ! headroom install start --profile "$PRIMARY_PROFILE" 2>/dev/null; then
+    if ! "$HEADROOM_BIN" install start --profile "$PRIMARY_PROFILE" 2>/dev/null; then
         echo "❌ Failed to restart manifest profile '$PRIMARY_PROFILE'." >&2
         exit 1
     fi
@@ -363,6 +553,14 @@ if HEALTH_URL=$(wait_for_health "${HEALTH_URLS[@]}"); then
 else
     echo "⚠ Proxy did not report healthy within 60s. Check logs at ${HOME}/.headroom/logs/" >&2
     exit 1
+fi
+
+# --- Restart secondary instances we stopped earlier ------------------------
+if [[ "$RESTART_AZURE" == "true" && -x "$AZURE_START_SCRIPT" ]]; then
+    echo "Restarting Azure proxy on port ${AZURE_PORT}..."
+    if ! "$AZURE_START_SCRIPT"; then
+        echo "⚠ Azure proxy did not restart cleanly. Run ${AZURE_START_SCRIPT} manually." >&2
+    fi
 fi
 
 echo "✓ Headroom update completed (${CURRENT_VERSION:-not installed} -> $LATEST_VERSION)"
