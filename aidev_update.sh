@@ -72,13 +72,21 @@ echo "DROID CLI Update"
 droid update
 
 echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
+echo "Copilot Update"
+copilot update
 
 echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/ccr_update.sh" "Claude Code Router Update"
+echo "Codex Update"
+run_update "$SCRIPT_DIR/codex_update.sh" "OpenAI Codex Update"
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/gemini_update.sh" "Gemini CLI Update"
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
+#
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/ccr_update.sh" "Claude Code Router Update"
+#
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/gemini_update.sh" "Gemini CLI Update"
 
 # https://www.npmjs.com/package/@vibe-kit/grok-cli
 #echo "Grok CLI"
@@ -86,10 +94,6 @@ run_update "$SCRIPT_DIR/gemini_update.sh" "Gemini CLI Update"
 #npm install -g @vibe-kit/grok-cli
 #grok --version
 #echo "-------------------------------------"
-
-
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/codex_update.sh" "OpenAI Codex Update"
 
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/qwen_update.sh" "Qwen Code Update"
@@ -124,6 +128,10 @@ run_update "$SCRIPT_DIR/headroom_update.sh" "Headroom Update"
 
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/ollama_update.sh" "Ollama Update"
+
+echo "------------------------------------------------------------"
+echo "Kilo Update"
+kilo upgrade
 
 echo ""
 echo "====================================="
