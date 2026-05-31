@@ -62,6 +62,9 @@ echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/openspec_update.sh" "OpenSpec Update"
 
 echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/mini_swe_agent_update.sh" "mini-swe-agent Update"
+
+echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/claude_update.sh" "Claude Code CLI Update"
 
 echo "Claude Code CLI Update"
