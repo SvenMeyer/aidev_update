@@ -77,6 +77,17 @@ wait_for_health() {
 
 mkdir -p "$LOG_DIR"
 
+if curl -fsSL "http://${HEADROOM_HOST}:${HEADROOM_PORT}/health" 2>/dev/null | is_healthy_response; then
+    echo "✓ Headroom is already running (http://${HEADROOM_HOST}:${HEADROOM_PORT}/health)"
+    exit 0
+fi
+
+if lsof -nP -iTCP:"${HEADROOM_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "❌ Port ${HEADROOM_PORT} is already in use by another process." >&2
+    lsof -nP -iTCP:"${HEADROOM_PORT}" -sTCP:LISTEN >&2 || true
+    exit 1
+fi
+
 IFS=$'\t' read -r PRIMARY_PROFILE PRIMARY_HEALTH_URL < <(find_latest_profile_on_port "$HEADROOM_PORT")
 
 if ! HEADROOM_BIN=$(resolve_headroom_bin); then

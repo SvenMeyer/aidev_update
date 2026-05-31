@@ -42,9 +42,17 @@ fi
 
 mkdir -p "$LOG_DIR"
 
-# Bail out if something is already listening on the port.
+# Exit early if the service is already healthy.
+response=$(curl -fsSL "$HEALTH_URL" 2>/dev/null || true)
+if [[ -n "$response" ]] && \
+   python3 -c 'import json,sys; d=json.load(sys.stdin); s=str(d.get("status","")).lower(); r=str(d.get("ready","")).lower(); sys.exit(0 if s=="healthy" or r=="true" else 1)' <<<"$response" 2>/dev/null; then
+    echo "✓ Headroom (azure) is already running ($HEALTH_URL)"
+    exit 0
+fi
+
+# Bail out if something unexpected is already listening on the port.
 if lsof -nP -iTCP:"$HEADROOM_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "Port $HEADROOM_PORT already in use:"
+    echo "❌ Port $HEADROOM_PORT already in use by another process:"
     lsof -nP -iTCP:"$HEADROOM_PORT" -sTCP:LISTEN
     exit 1
 fi

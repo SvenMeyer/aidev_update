@@ -136,6 +136,15 @@ echo "------------------------------------------------------------"
 echo "Kilo Update"
 kilo upgrade
 
+echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/beads_update.sh" "Beads Update"
+
+echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/gastown_update.sh" "Gastown Update"
+
+echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/gastown_gui_update.sh" "Gastown GUI Update"
+
 echo ""
 echo "====================================="
 echo "All updates completed!"
