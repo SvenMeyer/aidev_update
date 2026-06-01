@@ -22,6 +22,8 @@ if [[ ! -f "${GT_ROOT}/CLAUDE.md" ]]; then
     exit 1
 fi
 
+"${SCRIPT_DIR}/gastown_dolt_start.sh"
+
 if print_http_status "Gastown GUI" "$GASTOWN_GUI_PORT" "$URL"; then
     exit 0
 fi
