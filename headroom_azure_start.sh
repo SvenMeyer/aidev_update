@@ -20,6 +20,14 @@ HEALTH_CHECK_INTERVAL=5
 : "${AZURE_API_BASE:?AZURE_API_BASE must be set}"
 : "${AZURE_API_VERSION:?AZURE_API_VERSION must be set}"
 
+# Codex only speaks the OpenAI Responses API (/v1/responses), which the
+# litellm-azure backend does not translate — it falls through to api.openai.com.
+# Point Headroom's OpenAI/Codex passthrough at the same Azure deployment so that
+# /v1/responses reaches Azure. The litellm-azure chat/completions path (used by
+# droid) is unaffected. Codex must still send the `api-key` header and the
+# `api-version` query param (see the inf-azure-hr Codex profile).
+OPENAI_TARGET_API_URL="${AZURE_API_BASE%/}/openai/v1"
+
 resolve_headroom_bin() {
     local candidate=""
     for candidate in \
@@ -62,6 +70,7 @@ nohup env \
     AZURE_API_KEY="$AZURE_API_KEY" \
     AZURE_API_BASE="$AZURE_API_BASE" \
     AZURE_API_VERSION="$AZURE_API_VERSION" \
+    OPENAI_TARGET_API_URL="$OPENAI_TARGET_API_URL" \
     "$HEADROOM_BIN" proxy \
         --host "$HEADROOM_HOST" \
         --port "$HEADROOM_PORT" \
