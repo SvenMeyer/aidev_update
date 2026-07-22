@@ -74,17 +74,17 @@ echo "------------------------------------------------------------"
 echo "DROID CLI Update"
 droid update
 
-echo "------------------------------------------------------------"
-echo "Copilot Update"
-copilot update
+# echo "------------------------------------------------------------"
+# echo "Copilot Update"
+# copilot update
 
 echo "------------------------------------------------------------"
 echo "Codex Update"
 run_update "$SCRIPT_DIR/codex_update.sh" "OpenAI Codex Update"
 
-# echo "------------------------------------------------------------"
-# run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
-#
+echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
+
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/ccr_update.sh" "Claude Code Router Update"
 #
@@ -117,8 +117,8 @@ echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
 task-master --version
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/cliproxyapi_update.sh" "CLIProxyAPI Update"
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/cliproxyapi_update.sh" "CLIProxyAPI Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/antigravity_update.sh" "Google Antigravity Update"
@@ -133,8 +133,7 @@ run_update "$SCRIPT_DIR/headroom_update.sh" "Headroom Update"
 # run_update "$SCRIPT_DIR/ollama_update.sh" "Ollama Update"
 
 echo "------------------------------------------------------------"
-echo "Kilo Update"
-kilo upgrade
+run_update "$SCRIPT_DIR/kilo_update.sh" "Kilo Update"
 
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/beads_update.sh" "Beads Update"
@@ -145,7 +144,11 @@ run_update "$SCRIPT_DIR/gastown_update.sh" "Gastown Update"
 echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/gastown_gui_update.sh" "Gastown GUI Update"
 
+echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/repowise_update.sh" "Repowise Update"
+
 echo ""
+date
 echo "====================================="
 echo "All updates completed!"
 echo "====================================="
