@@ -10,8 +10,9 @@ GT_RELEASES_API_URL="https://api.github.com/repos/${GT_REPO}/releases"
 DOLT_REPO="dolthub/dolt"
 DOLT_LATEST_API_URL="https://api.github.com/repos/${DOLT_REPO}/releases/latest"
 
-DEFAULT_AGENT_NAME="copilot-gpt54"
-DEFAULT_AGENT_COMMAND="copilot --model gpt-5.4 --yolo"
+# Use the built-in `claude` agent (Claude Code CLI). It authenticates with the
+# local Claude subscription/login — no API key or separate plan required.
+DEFAULT_AGENT_NAME="claude"
 
 retry_command() {
     local max_attempts=2
@@ -346,7 +347,8 @@ ensure_gt_home_and_default_agent() {
     echo "Configuring default agent..."
     (
         cd "$GT_HOME"
-        gt config agent set "$DEFAULT_AGENT_NAME" "$DEFAULT_AGENT_COMMAND" --provider copilot
+        # `claude` is a built-in agent, so no `gt config agent set` is needed —
+        # just point the town-global default at it.
         gt config default-agent "$DEFAULT_AGENT_NAME"
         echo "Default agent       : $(gt config default-agent)"
     )
@@ -377,8 +379,8 @@ if ! command -v git >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! command -v copilot >/dev/null 2>&1; then
-    echo "❌ 'copilot' is required but not installed."
+if ! command -v claude >/dev/null 2>&1; then
+    echo "❌ 'claude' (Claude Code CLI) is required but not installed."
     exit 1
 fi
 
