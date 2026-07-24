@@ -20,6 +20,11 @@ PIPX_VENV_DIR="${PIPX_HOME:-${HOME}/.local/share/pipx}/venvs/${HEADROOM_PACKAGE}
 HEALTH_CHECK_ATTEMPTS=12
 HEALTH_CHECK_INTERVAL=5
 
+# Azure proxy (:8788) is deprecated — we no longer run it. The stop/restart
+# logic further down is kept intact behind this flag in case we need it again.
+# Leave false so updates neither stop nor start the Azure instance.
+MANAGE_AZURE=false
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -339,6 +344,71 @@ start_direct_proxy() {
     echo "Proxy PID: $!"
 }
 
+# Ensure headroom is running and healthy on HEADROOM_PORT, starting it if
+# needed. Used both on the normal update path and on the early-exit paths
+# (already up to date / installed newer) so the proxy is always up at the end.
+ensure_headroom_running() {
+    local -a health_urls=(
+        "http://${HEADROOM_HOST}:${HEADROOM_PORT}/health"
+        "http://${HEADROOM_HOST}:${HEADROOM_PORT}/readyz"
+        "http://localhost:${HEADROOM_PORT}/health"
+        "http://localhost:${HEADROOM_PORT}/readyz"
+    )
+
+    # Already healthy? Nothing to do.
+    local url response
+    for url in "${health_urls[@]}"; do
+        response=$(curl -fsSL "$url" 2>/dev/null || true)
+        if [[ -n "$response" ]] && is_healthy_response <<<"$response"; then
+            echo "✓ Headroom already running and healthy ($url)"
+            return 0
+        fi
+    done
+
+    local owner owner_name
+    owner=$(get_port_owner "$HEADROOM_PORT")
+    if [[ -n "$owner" ]]; then
+        owner_name=$(echo "$owner" | awk '{print $1}')
+        if [[ "$owner_name" != "headroom" ]]; then
+            echo "⚠ Port $HEADROOM_PORT is occupied by non-headroom process: $owner. Not starting headroom." >&2
+            return 1
+        fi
+        # headroom is on the port but not healthy yet — fall through to the health wait.
+    else
+        # Nothing on the port — start it.
+        if [[ -z "${HEADROOM_BIN:-}" ]]; then
+            refresh_headroom_bin
+        fi
+        if [[ -z "${HEADROOM_BIN:-}" ]]; then
+            echo "⚠ 'headroom' CLI not found; cannot start proxy." >&2
+            return 1
+        fi
+
+        # Prefer a registered manifest profile on the port; else start the proxy directly.
+        local profile="" candidate
+        while IFS=$'\t' read -r _updated_at candidate _health_url; do
+            [[ -n "$candidate" ]] || continue
+            profile="$candidate"
+        done < <(find_profiles_on_port "$HEADROOM_PORT")
+
+        if [[ -n "$profile" ]]; then
+            echo "Starting manifest profile '$profile' in background..."
+            "$HEADROOM_BIN" install start --profile "$profile" 2>/dev/null || true
+        else
+            start_direct_proxy
+        fi
+    fi
+
+    echo "Waiting for proxy health on port $HEADROOM_PORT..."
+    local healthy_url
+    if healthy_url=$(wait_for_health "${health_urls[@]}"); then
+        echo "✓ Proxy is healthy ($healthy_url)"
+        return 0
+    fi
+    echo "⚠ Proxy did not report healthy within 60s. Check logs at ${HOME}/.headroom/logs/" >&2
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Main logic
 # ---------------------------------------------------------------------------
@@ -364,6 +434,9 @@ else
     LATEST_VERSION=$(get_latest_version || true)
     if [[ -z "$LATEST_VERSION" ]]; then
         echo "Could not determine latest version. Skipping update."
+        if [[ "$HEADROOM_AVAILABLE" == "true" ]]; then
+            ensure_headroom_running || true
+        fi
         exit 0
     fi
     echo "Latest version: $LATEST_VERSION"
@@ -382,12 +455,14 @@ if [[ -z "$OVERRIDE_VERSION" ]]; then
     if [[ -n "$CURRENT_VERSION" && -n "$LATEST_VERSION" ]]; then
         if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
             echo "✓ Headroom already up to date ($CURRENT_VERSION)"
+            ensure_headroom_running || exit 1
             exit 0
         fi
         # Is current newer than latest? (e.g. local dev build)
         if [[ "$(printf '%s\n%s\n' "$CURRENT_VERSION" "$LATEST_VERSION" | sort -V | tail -1)" == "$CURRENT_VERSION" ]] \
             && [[ "$CURRENT_VERSION" != "$LATEST_VERSION" ]]; then
             echo "✓ Installed version ($CURRENT_VERSION) is newer than latest ($LATEST_VERSION). Skipping."
+            ensure_headroom_running || exit 1
             exit 0
         fi
     fi
@@ -402,7 +477,8 @@ AZURE_START_SCRIPT="${SCRIPT_DIR}/headroom_azure_start.sh"
 AZURE_PORT=8788
 RESTART_AZURE=false
 
-if [[ -x "$AZURE_STOP_SCRIPT" ]] && lsof -nP -iTCP:"$AZURE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+if [[ "$MANAGE_AZURE" == "true" ]] \
+    && [[ -x "$AZURE_STOP_SCRIPT" ]] && lsof -nP -iTCP:"$AZURE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "Stopping Azure proxy on port ${AZURE_PORT}..."
     if "$AZURE_STOP_SCRIPT"; then
         RESTART_AZURE=true
@@ -556,7 +632,7 @@ else
 fi
 
 # --- Restart secondary instances we stopped earlier ------------------------
-if [[ "$RESTART_AZURE" == "true" && -x "$AZURE_START_SCRIPT" ]]; then
+if [[ "$MANAGE_AZURE" == "true" && "$RESTART_AZURE" == "true" && -x "$AZURE_START_SCRIPT" ]]; then
     echo "Restarting Azure proxy on port ${AZURE_PORT}..."
     if ! "$AZURE_START_SCRIPT"; then
         echo "⚠ Azure proxy did not restart cleanly. Run ${AZURE_START_SCRIPT} manually." >&2
