@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Headroom AI update script
-# https://github.com/chopratejas/headroom/releases
+# https://github.com/headroomlabs-ai/headroom/releases
 #
 # Usage:
 #   ./headroom_update.sh                   # normal update to latest
@@ -11,7 +11,7 @@ set -euo pipefail
 
 HEADROOM_HOST="127.0.0.1"
 HEADROOM_PORT=8787
-HEADROOM_REPO="chopratejas/headroom"
+HEADROOM_REPO="headroomlabs-ai/headroom"
 HEADROOM_PACKAGE="headroom-ai"
 HEADROOM_FULL_EXTRAS="all"
 HEADROOM_FALLBACK_EXTRAS="benchmark,code,evals,html,mcp,memory,ml,otel,proxy,relevance,reports,voice"

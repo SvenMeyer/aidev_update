@@ -5,7 +5,7 @@
 # is recorded in metrics totals but does not appear in `/stats` recent
 # requests or the dashboard live feed, and streaming output_tokens is
 # always 0. PR #391 fixes both upstream:
-#   https://github.com/chopratejas/headroom/pull/391
+#   https://github.com/headroomlabs-ai/headroom/pull/391
 #
 # This script patches the freshly-installed pipx files in place. It is
 # idempotent: running it twice is a no-op. It is intended to be invoked
