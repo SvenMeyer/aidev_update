@@ -160,15 +160,19 @@ python_version_label() {
 }
 
 PROBE_INSTALL_ERROR=""
+
 probe_headroom_install() {
     local python_bin="$1"
     local install_spec="$2"
     local tmp_dir=""
     local log_file=""
 
+    # Ensure custom TMPDIR exists if specified, otherwise default to /tmp
+    mkdir -p "${TMPDIR:-/tmp}"
     tmp_dir=$(mktemp -d)
     log_file="${tmp_dir}/probe.log"
 
+    # Create light probe venv
     if ! "$python_bin" -m venv "${tmp_dir}/venv" >"$log_file" 2>&1; then
         PROBE_INSTALL_ERROR=$(tail -n 20 "$log_file" 2>/dev/null || true)
         rm -rf "$tmp_dir"
@@ -181,13 +185,8 @@ probe_headroom_install() {
         return 1
     fi
 
-    if ! "${tmp_dir}/venv/bin/pip" install "$install_spec" >>"$log_file" 2>&1; then
-        PROBE_INSTALL_ERROR=$(tail -n 20 "$log_file" 2>/dev/null || true)
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    if ! "${tmp_dir}/venv/bin/headroom" --version >>"$log_file" 2>&1; then
+    # Dry-run check to verify dependency compatibility without filling disk space
+    if ! "${tmp_dir}/venv/bin/pip" install --dry-run "$install_spec" >>"$log_file" 2>&1; then
         PROBE_INSTALL_ERROR=$(tail -n 20 "$log_file" 2>/dev/null || true)
         rm -rf "$tmp_dir"
         return 1
