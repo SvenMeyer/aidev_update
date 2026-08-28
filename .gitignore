@@ -1,0 +1,5 @@
+# Tool state / local config
+.cache/
+.claude/
+.repowise/
+.neon
