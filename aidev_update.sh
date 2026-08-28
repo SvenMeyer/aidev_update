@@ -113,9 +113,9 @@ run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/codebuff_update.sh" "Codebuff Update"
 
-echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
-task-master --version
+# echo "------------------------------------------------------------"
+# run_update "$SCRIPT_DIR/tm_update.sh" "Taskmaster Update"
+# task-master --version
 
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/cliproxyapi_update.sh" "CLIProxyAPI Update"
