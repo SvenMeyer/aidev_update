@@ -65,20 +65,11 @@ aidev_update/
 ├── ollama_update.sh            # Ollama updater
 ├── ollama_install.sh           # Ollama installer
 ├── ollama_install_cached.sh    # Ollama installer (cached version)
-├── ollama_update_fixed.sh      # Ollama updater (fixed version)
-├── ollama_update_kimi.sh       # Ollama updater (Kimi variant)
-├── ollama_update_optimized.sh  # Ollama updater (optimized version)
 ├── codebuff_update.sh          # Codebuff updater
 ├── llxprt_update.sh            # llxprt-code updater
 ├── opencode_update.sh          # OpenCode CLI updater
 ├── justcode_update.sh          # justcode updater
-├── qwen_update.sh              # Qwen Code updater
-├── run_test.sh                 # Test runner
-├── test_kimi.sh                # Kimi variant test
-├── test_new_version.sh         # New version test
-├── test_optimized.sh           # Optimized version test
-├── test_version.sh             # Version test
-└── test_version_comparison.sh  # Version comparison test
+└── qwen_update.sh              # Qwen Code updater
 ```
 
 ## Features
