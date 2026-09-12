@@ -42,7 +42,6 @@ The script will automatically:
 - **Claude Code Router** - `ccr_update.sh`
 - **CLIProxyAPI** - `cliproxyapi_update.sh`
 - **Gemini CLI** - `gemini_update.sh`
-- **Google Antigravity** - `antigravity_update.sh`
 - **OpenAI Codex** - `codex_update.sh`
 - **OpenSpec** - `openspec_update.sh`
 - **Amp Code** - `amp_update.sh`
@@ -60,7 +59,6 @@ aidev_update/
 ├── cliproxyapi_update.sh       # CLIProxyAPI updater
 ├── gemini_update.sh            # Gemini CLI updater
 ├── gemini_install.sh           # Gemini CLI installer
-├── antigravity_update.sh       # Google Antigravity updater
 ├── openspec_update.sh          # OpenSpec updater
 ├── amp_update.sh               # Amp Code updater
 ├── tm_update.sh                # Taskmaster updater

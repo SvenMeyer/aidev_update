@@ -121,9 +121,6 @@ run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
 # run_update "$SCRIPT_DIR/cliproxyapi_update.sh" "CLIProxyAPI Update"
 
 echo "------------------------------------------------------------"
-run_update "$SCRIPT_DIR/antigravity_update.sh" "Google Antigravity Update"
-
-echo "------------------------------------------------------------"
 run_update "$SCRIPT_DIR/entire_update.sh" "Entire Update"
 
 echo "------------------------------------------------------------"
