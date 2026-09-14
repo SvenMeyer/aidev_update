@@ -47,6 +47,7 @@ The script will automatically:
 - **Amp Code** - `amp_update.sh`
 - **Taskmaster** - `tm_update.sh`
 - **Ollama** - `ollama_update.sh`
+- **mini-swe-agent** - `mini_swe_agent_update.sh`
 
 ## Directory Structure
 
@@ -69,6 +70,7 @@ aidev_update/
 ├── llxprt_update.sh            # llxprt-code updater
 ├── opencode_update.sh          # OpenCode CLI updater
 ├── justcode_update.sh          # justcode updater
+├── mini_swe_agent_update.sh    # mini-swe-agent installer/updater
 └── qwen_update.sh              # Qwen Code updater
 ```
 
