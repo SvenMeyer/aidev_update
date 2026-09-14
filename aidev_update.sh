@@ -71,6 +71,9 @@ echo "Claude Code CLI Update"
 claude update
 
 echo "------------------------------------------------------------"
+run_update "$SCRIPT_DIR/grok_update.sh" "Grok CLI Update"
+
+echo "------------------------------------------------------------"
 echo "DROID CLI Update"
 droid update
 
@@ -90,13 +93,6 @@ run_update "$SCRIPT_DIR/opencode_update.sh" "OpenCode CLI Update"
 #
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/gemini_update.sh" "Gemini CLI Update"
-
-# https://www.npmjs.com/package/@vibe-kit/grok-cli
-#echo "Grok CLI"
-#grok --version
-#npm install -g @vibe-kit/grok-cli
-#grok --version
-#echo "-------------------------------------"
 
 # echo "------------------------------------------------------------"
 # run_update "$SCRIPT_DIR/qwen_update.sh" "Qwen Code Update"
