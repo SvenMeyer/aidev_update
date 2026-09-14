@@ -13,8 +13,10 @@ A comprehensive update script for managing multiple AI-powered development CLI t
 - **npm** (Node Package Manager)
 - **curl** (for downloading updates)
 - **bash** (shell environment)
+- **pipx** (for the Python-based tools: mini-swe-agent, headroom)
+- **python3** (used by the pipx-based updaters)
 
-The script will check for these dependencies before running and exit with an error if any are missing.
+`aidev_update.sh` checks for **npm** and **curl** before running and exits with an error if either is missing. The remaining tools are checked by the individual update scripts that need them, which fail with an actionable message if one is absent.
 
 ## Usage
 
