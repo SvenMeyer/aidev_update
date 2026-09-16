@@ -34,33 +34,43 @@ if ! sleep 0.1 >/dev/null 2>&1; then
     FRACTIONAL_SLEEP=0
 fi
 
+# Defaults are applied here; the values themselves are sanitized by
+# validate_env right before logging starts, so misconfiguration warnings are
+# captured in the run log as well as on the terminal.
 AIDEV_TIMEOUT="${AIDEV_TIMEOUT:-600}"
-if ! [[ "$AIDEV_TIMEOUT" =~ ^[0-9]+$ ]]; then
-    echo "⚠ AIDEV_TIMEOUT must be a whole number of seconds; using 600." >&2
-    AIDEV_TIMEOUT=600
-fi
 
 # Seconds to wait after SIGTERM before killing a hung step. timeout(1) exits
 # 124 when it has to kill the step (TERM or KILL escalation); see classify_rc
 # for how that is distinguished from a step's own exit code.
 AIDEV_KILL_AFTER="${AIDEV_KILL_AFTER:-10}"
-if ! [[ "$AIDEV_KILL_AFTER" =~ ^[0-9]+$ ]]; then
-    echo "⚠ AIDEV_KILL_AFTER must be a whole number of seconds; using 10." >&2
-    AIDEV_KILL_AFTER=10
-fi
 
 AIDEV_LOG_RETENTION_DAYS="${AIDEV_LOG_RETENTION_DAYS:-30}"
-if ! [[ "$AIDEV_LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
-    echo "⚠ AIDEV_LOG_RETENTION_DAYS must be a whole number of days; using 30." >&2
-    AIDEV_LOG_RETENTION_DAYS=30
-fi
 
 # Attempts per step when it exits non-zero (timeouts are not retried).
 AIDEV_RETRIES="${AIDEV_RETRIES:-1}"
-if ! [[ "$AIDEV_RETRIES" =~ ^[0-9]+$ ]] || [ "$AIDEV_RETRIES" -lt 1 ]; then
-    echo "⚠ AIDEV_RETRIES must be a whole number >= 1; using 1." >&2
-    AIDEV_RETRIES=1
-fi
+
+# Sanitize the tunables above, falling back to defaults for bad values.
+# Warnings are queued in EARLY_WARNINGS and printed once logging is engaged
+# (or immediately, when logging is disabled), so they land in the log file.
+EARLY_WARNINGS=()
+validate_env() {
+    if ! [[ "$AIDEV_TIMEOUT" =~ ^[0-9]+$ ]]; then
+        EARLY_WARNINGS+=("⚠ AIDEV_TIMEOUT must be a whole number of seconds; using 600.")
+        AIDEV_TIMEOUT=600
+    fi
+    if ! [[ "$AIDEV_KILL_AFTER" =~ ^[0-9]+$ ]]; then
+        EARLY_WARNINGS+=("⚠ AIDEV_KILL_AFTER must be a whole number of seconds; using 10.")
+        AIDEV_KILL_AFTER=10
+    fi
+    if ! [[ "$AIDEV_LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
+        EARLY_WARNINGS+=("⚠ AIDEV_LOG_RETENTION_DAYS must be a whole number of days; using 30.")
+        AIDEV_LOG_RETENTION_DAYS=30
+    fi
+    if ! [[ "$AIDEV_RETRIES" =~ ^[0-9]+$ ]] || [ "$AIDEV_RETRIES" -lt 1 ]; then
+        EARLY_WARNINGS+=("⚠ AIDEV_RETRIES must be a whole number >= 1; using 1.")
+        AIDEV_RETRIES=1
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Step configuration
@@ -352,6 +362,12 @@ done
 
 if [ ${#selected_entries[@]} -eq 0 ]; then
     echo "⚠ No steps matched the given --only/--skip filters." >&2
+    echo "Available steps:" >&2
+    for entry in "${STEPS[@]}"; do
+        IFS='|' read -r _ target description <<< "$entry"
+        printf '  %-28s %s\n' "$target" "$description" >&2
+    done
+    echo "Run '$(basename "$0") --list' for availability details." >&2
     exit 2
 fi
 
@@ -381,6 +397,9 @@ fi
 LOCK_FILE=""
 if command_exists flock; then
     LOCK_FILE="$SCRIPT_DIR/.aidev_update.lock"
+    # Steps are launched with '8>&-' so they (and any daemons they leave
+    # behind) never inherit the lock fd; without that, a surviving daemon
+    # would hold the flock and wedge every future run.
     if : >> "$LOCK_FILE" 2>/dev/null && exec 8>>"$LOCK_FILE"; then
         if flock -n 8; then
             : # Lock acquired; fd 8 is held until the script exits.
@@ -403,20 +422,36 @@ fi
 # up to --jobs N in parallel mode).
 # ---------------------------------------------------------------------------
 STEP_CHILDREN=()
-# Predeclare the logging globals so the handler can reference TEE_PID even if
-# a signal arrives before logging is set up.
+# Predeclare the globals the handler and the EXIT trap reference even if a
+# signal arrives before logging/parallel mode is set up.
 TEE_PID=""
 LOG_FIFO=""
+PAR_TMPDIR=""
+
+# Signal a step's whole descendant tree, deepest first, then the step itself.
+# Signalling only the direct child would orphan grandchildren: parallel steps
+# run inside a wrapper subshell (see run_steps_parallel), and steps like npm
+# spawn children of their own.
+kill_tree() {
+    local pid="$1" sig="${2:-TERM}" child
+    if command_exists pgrep; then
+        for child in $(pgrep -P "$pid" 2>/dev/null); do
+            kill_tree "$child" "$sig"
+        done
+    fi
+    kill "-$sig" "$pid" 2>/dev/null
+    return 0
+}
 
 on_signal() {
     local code="$1"
     local pid
     if [ "${#STEP_CHILDREN[@]}" -gt 0 ]; then
         for pid in "${STEP_CHILDREN[@]}"; do
-            kill "$pid" 2>/dev/null
+            kill_tree "$pid" TERM
             # Bound the wait: a step that ignores SIGTERM must not block Ctrl-C.
             if ! wait_for_pid "$pid" "$AIDEV_KILL_AFTER"; then
-                kill -9 "$pid" 2>/dev/null
+                kill_tree "$pid" 9
                 wait_for_pid "$pid" 2
             fi
             wait "$pid" 2>/dev/null
@@ -428,7 +463,7 @@ on_signal() {
     if command_exists pgrep; then
         for pid in $(pgrep -P "$$" 2>/dev/null); do
             [ "$pid" = "$TEE_PID" ] && continue
-            kill "$pid" 2>/dev/null
+            kill_tree "$pid" TERM
         done
     fi
     exit "$code"
@@ -465,7 +500,16 @@ cleanup_logging() {
         [ -p "$LOG_FIFO" ] && rm -f "$LOG_FIFO"
     fi
 }
-trap cleanup_logging EXIT
+# EXIT trap: remove the parallel-mode temp dir (also on signal-interrupted
+# runs) and then flush/close the logging pipeline.
+on_exit() {
+    if [ -n "$PAR_TMPDIR" ]; then
+        rm -rf "$PAR_TMPDIR"
+        PAR_TMPDIR=""
+    fi
+    cleanup_logging
+}
+trap on_exit EXIT
 
 prune_logs() {
     local dir="$1" days="$2"
@@ -477,6 +521,10 @@ prune_logs() {
     find "$dir" -maxdepth 1 -type f -name 'aidev-*.log' \
         -mtime +"$days" -delete 2>/dev/null || true
 }
+
+# Sanitize tunables before anything consumes them (prune_logs reads
+# AIDEV_LOG_RETENTION_DAYS below); warnings are replayed once logging is up.
+validate_env
 
 if [ "${AIDEV_NO_LOG:-0}" != "1" ]; then
     if ! command_exists mkfifo || ! command_exists tee; then
@@ -502,6 +550,10 @@ if [ "${AIDEV_NO_LOG:-0}" != "1" ]; then
             LOG_FILE=""
         fi
     fi
+fi
+
+if [ ${#EARLY_WARNINGS[@]} -gt 0 ]; then
+    printf '%s\n' "${EARLY_WARNINGS[@]}" >&2
 fi
 
 RUN_STARTED=$(date '+%Y-%m-%d %H:%M:%S')
@@ -575,9 +627,9 @@ execute_step() {
         if command_exists timeout && [ "$AIDEV_TIMEOUT" -gt 0 ]; then
             used_timeout=1
             timeout --kill-after="$AIDEV_KILL_AFTER" "$AIDEV_TIMEOUT" \
-                "${STEP_CMD[@]}" &
+                "${STEP_CMD[@]}" 8>&- &
         else
-            "${STEP_CMD[@]}" &
+            "${STEP_CMD[@]}" 8>&- &
         fi
         STEP_CHILDREN=($!)
         wait "${STEP_CHILDREN[0]}" || rc=$?
@@ -609,113 +661,149 @@ run_steps_parallel() {
         echo "❌ Could not create a temp dir for step output." >&2
         return 1
     fi
+    PAR_TMPDIR="$tmpdir"
 
     # Per-step state, indexed by selection position.
     local -a p_pid=() p_out=() p_start=() p_total=() p_attempt=() p_used=()
     local -a live=()   # selection indices currently running
 
-    # Launch selection index $1 in the background (STEP_CMD must already be
-    # resolved). Uses its own locals so outer loop variables are untouched.
+    # Launch selection index $1 in the background. The step is resolved here
+    # (not taken from the global STEP_CMD, which by retry time may hold a
+    # different step's argv). Each step runs inside a wrapper subshell that
+    # records the step's exact exit code in '<out>.rc' when it finishes, so
+    # reaping never has to guess which pid a returned status belonged to
+    # (and the log tee cannot interfere). Returns 1 if the step cannot be
+    # resolved (e.g. its script vanished before a retry).
     spawn_step() {
-        local si="$1"
-        p_out[$si]="$tmpdir/step-$si.log"
-        p_start[$si]=$SECONDS
+        local si="$1" kind target description
+        IFS='|' read -r kind target description <<< "${selected_entries[si]}"
+        resolve_step "$kind" "$target" || return 1
+        p_out[si]="$tmpdir/step-$si.log"
+        p_start[si]=$SECONDS
+        rm -f "${p_out[si]}.rc"
         if [ "$AIDEV_TIMEOUT" -gt 0 ] && command_exists timeout; then
-            p_used[$si]=1
-            timeout --kill-after="$AIDEV_KILL_AFTER" "$AIDEV_TIMEOUT" \
-                "${STEP_CMD[@]}" > "${p_out[$si]}" 2>&1 &
+            p_used[si]=1
+            (
+                timeout --kill-after="$AIDEV_KILL_AFTER" "$AIDEV_TIMEOUT" \
+                    "${STEP_CMD[@]}" > "${p_out[si]}" 2>&1
+                echo $? > "${p_out[si]}.rc"
+            ) 8>&- &
         else
-            p_used[$si]=0
-            "${STEP_CMD[@]}" > "${p_out[$si]}" 2>&1 &
+            p_used[si]=0
+            (
+                "${STEP_CMD[@]}" > "${p_out[si]}" 2>&1
+                echo $? > "${p_out[si]}.rc"
+            ) 8>&- &
         fi
-        p_pid[$si]=$!
+        p_pid[si]=$!
         STEP_CHILDREN+=("$!")
         live+=("$si")
     }
 
     # Record the outcome of selection index $1 (exit code $2) and print the
-    # buffered output. Returns 1 when the step was relaunched for a retry.
+    # buffered output. A failed step with attempts left is relaunched; the
+    # caller has already removed the index from 'live', so a retry re-adds it
+    # exactly once and job slots are never double-counted.
     finish_step() {
-        local fi="$1" frc="$2"
+        local idx="$1" rc="$2"
         local seconds kind target description
-        seconds=$((SECONDS - p_start[fi]))
-        classify_rc "$frc" "$seconds" "${p_used[$fi]}"
-        RESULT_STATUS[$fi]="$STEP_STATUS"
-        RESULT_SECONDS[$fi]=$((SECONDS - p_total[fi]))
-        RESULT_RC[$fi]="$frc"
+        seconds=$((SECONDS - p_start[idx]))
+        classify_rc "$rc" "$seconds" "${p_used[idx]}"
+        RESULT_STATUS[idx]="$STEP_STATUS"
+        RESULT_SECONDS[idx]=$((SECONDS - p_total[idx]))
+        RESULT_RC[idx]="$rc"
 
-        IFS='|' read -r kind target description <<< "${selected_entries[$fi]}"
-        if [ "$STEP_STATUS" = "fail" ] && [ "${p_attempt[$fi]}" -lt "$AIDEV_RETRIES" ]; then
-            p_attempt[$fi]=$((p_attempt[$fi] + 1))
-            echo "↻ $description failed (exit $frc); retrying (attempt ${p_attempt[$fi]} of $AIDEV_RETRIES)..."
-            spawn_step "$fi"
-            return 1
+        IFS='|' read -r kind target description <<< "${selected_entries[idx]}"
+        if [ "$STEP_STATUS" = "fail" ] && [ "${p_attempt[idx]}" -lt "$AIDEV_RETRIES" ]; then
+            if spawn_step "$idx"; then
+                p_attempt[idx]=$((p_attempt[idx] + 1))
+                echo "↻ $description failed (exit $rc); retrying (attempt ${p_attempt[idx]} of $AIDEV_RETRIES)..."
+                return 0
+            fi
+            echo "⚠ $description cannot be retried: ${STEP_SKIP_REASON}"
         fi
 
         print_header "$description"
-        [ -f "${p_out[$fi]}" ] && cat "${p_out[$fi]}"
+        [ -f "${p_out[idx]}" ] && cat "${p_out[idx]}"
         case "$STEP_STATUS" in
-            ok)      echo "✓ $description completed successfully (${RESULT_SECONDS[$fi]}s)" ;;
+            ok)      echo "✓ $description completed successfully (${RESULT_SECONDS[idx]}s)" ;;
             timeout) echo "✗ $description timed out after ${seconds}s (limit ${AIDEV_TIMEOUT}s)"; failures+=("$description") ;;
-            fail)    echo "✗ $description failed (exit $frc, ${RESULT_SECONDS[$fi]}s)"; failures+=("$description") ;;
+            fail)    echo "✗ $description failed (exit $rc, ${RESULT_SECONDS[idx]}s)"; failures+=("$description") ;;
         esac
         return 0
     }
 
-    # Reap one finished step. 'wait -n' blocks until any background job of
-    # this shell finishes and returns its status; the reaped child is then
-    # identified because a reaped process no longer answers 'kill -0'
-    # (zombies still do). Returns 1 if no step finished (e.g. the log tee
-    # exited, or a trap interrupted the wait).
-    reap_step() {
-        local rrc=0 rk ridx j c
-        local -a remaining=() kept=()
-        wait -n || rrc=$?
-        for rk in "${!live[@]}"; do
-            ridx="${live[$rk]}"
-            if ! kill -0 "${p_pid[$ridx]}" 2>/dev/null; then
-                if finish_step "$ridx" "$rrc"; then
-                    for j in "${live[@]}"; do
-                        [ "$j" = "$ridx" ] || remaining+=("$j")
-                    done
-                    live=("${remaining[@]}")
-                    for c in "${STEP_CHILDREN[@]}"; do
-                        [ "$c" = "${p_pid[$ridx]}" ] || kept+=("$c")
-                    done
-                    STEP_CHILDREN=("${kept[@]}")
-                fi
-                return 0
+    # Reap every step whose wrapper has written its rc file. A finished index
+    # is removed from 'live' BEFORE finish_step runs, so a retry re-adds it
+    # exactly once. An rc file that exists but is still empty (write in
+    # flight) counts as not finished yet. Returns 1 when nothing finished, so
+    # callers can sleep between polls.
+    reap_finished() {
+        local ridx frc i c
+        local -a done_idx=() done_rc=() still_live=() kept=()
+        for ridx in "${live[@]}"; do
+            frc=""
+            [ -f "${p_out[ridx]}.rc" ] && frc="$(<"${p_out[ridx]}".rc)"
+            if [ -n "$frc" ]; then
+                done_idx+=("$ridx")
+                done_rc+=("$frc")
+            else
+                still_live+=("$ridx")
             fi
         done
-        return 1
+        [ "${#done_idx[@]}" -eq 0 ] && return 1
+        live=("${still_live[@]}")
+        for i in "${!done_idx[@]}"; do
+            ridx="${done_idx[i]}"
+            frc="${done_rc[i]}"
+            wait "${p_pid[ridx]}" 2>/dev/null
+            kept=()
+            for c in ${STEP_CHILDREN[@]+"${STEP_CHILDREN[@]}"}; do
+                [ "$c" = "${p_pid[ridx]}" ] || kept+=("$c")
+            done
+            STEP_CHILDREN=("${kept[@]}")
+            finish_step "$ridx" "$frc"
+        done
+        return 0
     }
+
+    # Poll interval for reap_finished.
+    local tick=1
+    [ "$FRACTIONAL_SLEEP" = 1 ] && tick="0.1"
 
     local i kind target description
     for ((i = 0; i < n; i++)); do
-        IFS='|' read -r kind target description <<< "${selected_entries[$i]}"
+        IFS='|' read -r kind target description <<< "${selected_entries[i]}"
         if ! resolve_step "$kind" "$target"; then
             echo "⚠ ${STEP_SKIP_REASON}"
-            RESULT_STATUS[$i]="skip"
-            RESULT_SECONDS[$i]=0
-            RESULT_RC[$i]=""
+            RESULT_STATUS[i]="skip"
+            RESULT_SECONDS[i]=0
+            RESULT_RC[i]=""
             continue
         fi
         # Wait for a free slot.
         while [ "${#live[@]}" -ge "$JOBS" ]; do
-            reap_step || :
+            reap_finished || sleep "$tick"
         done
-        p_attempt[$i]=1
-        p_total[$i]=$SECONDS
-        spawn_step "$i"
+        p_attempt[i]=1
+        p_total[i]=$SECONDS
+        spawn_step "$i" || {
+            echo "⚠ ${STEP_SKIP_REASON}"
+            RESULT_STATUS[i]="skip"
+            RESULT_SECONDS[i]=0
+            RESULT_RC[i]=""
+        }
     done
 
     while [ "${#live[@]}" -gt 0 ]; do
-        reap_step || :
+        reap_finished || sleep "$tick"
     done
 
     rm -rf "$tmpdir"
+    PAR_TMPDIR=""
     return 0
 }
+
 
 # ---------------------------------------------------------------------------
 # Run

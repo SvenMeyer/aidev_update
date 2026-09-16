@@ -72,7 +72,10 @@ piped elsewhere. Old logs are pruned after each run according to
 Steps are run under `timeout --kill-after` so a step that ignores SIGTERM is
 eventually killed instead of blocking the run. A step that exits `124`/`137` on
 its own is reported as a failure, not as a timeout. On `SIGINT`/`SIGTERM` the
-running steps are terminated and the script exits `130`/`143` respectively.
+running steps — and their whole descendant trees, e.g. `npm` children — are
+terminated and the script exits `130`/`143` respectively. The lock descriptor
+is never inherited by spawned steps, so daemons a step leaves behind cannot
+hold the concurrency lock after the run ends.
 
 ## Tools Managed
 
@@ -129,13 +132,16 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 - **Dry run** — `--dry-run` resolves every selected step, reports it and shows
   the exact argv that would run
 - **Parallel runs** — `--jobs N` runs steps concurrently with buffered,
-  non-interleaved output
-- **Retries** — `AIDEV_RETRIES` retries a step that exits non-zero
+  non-interleaved output; each step's exit code is recorded by its own wrapper,
+  so statuses are attributed exactly even when steps finish simultaneously
+- **Retries** — `AIDEV_RETRIES` retries a step that exits non-zero (a retry
+  always re-runs its own step, in both sequential and parallel modes)
 - **Error isolation** — one failed update does not stop the others
 - **Per-step timeout** — `timeout --kill-after` stops even a SIGTERM-ignoring
   updater from blocking the run
-- **Signal handling** — `SIGINT`/`SIGTERM` terminate the running steps and exit
-  `130`/`143`
+- **Signal handling** — `SIGINT`/`SIGTERM` terminate the running steps and
+  their process trees and exit `130`/`143`; parallel-mode temp dirs are
+  removed even on signal-interrupted runs
 - **Concurrency guard** — `flock` prevents two runs from clashing; a read-only
   install directory only disables the guard instead of aborting
 - **Timing and summary** — per-step status, duration and exit-code table at the
@@ -148,8 +154,10 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 
 `tests/orchestrator_test.sh` builds a throwaway copy of the orchestrator with
 stub steps and checks selection, dry-run, timeouts, exit-code classification,
-retries, parallel runs, skip handling, logging, the concurrency lock, signal
-handling and the no-`tee`/no-`timeout` fallbacks:
+retries, parallel runs (including exit-code attribution when steps finish
+simultaneously), skip handling, logging, the concurrency lock (including that
+steps never inherit the lock fd), signal handling (including process-tree and
+temp-dir cleanup) and the no-`tee`/no-`timeout` fallbacks:
 
 ```bash
 ./tests/orchestrator_test.sh

@@ -128,6 +128,66 @@ while [ ! -f gate-a.marker ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); do
 if [ -f gate-a.marker ]; then echo "gate b met gate a"; exit 0; fi
 echo "gate b gave up"; exit 1
 EOF
+
+# Two steps that finish at (nearly) the same instant with distinct exit codes:
+# parallel reaping must attribute each code to the right step.
+cat > "$WORK/twin_a.sh" <<'EOF'
+#!/bin/bash
+sleep 1
+exit 10
+EOF
+
+cat > "$WORK/twin_b.sh" <<'EOF'
+#!/bin/bash
+sleep 1
+exit 20
+EOF
+
+# A step with a background grandchild: signals must clean up the whole tree.
+cat > "$WORK/treestep.sh" <<'EOF'
+#!/bin/bash
+sleep 300 &
+echo $! > tree-child.pid
+wait
+EOF
+
+# Fails instantly on the first attempt; the successful retry takes 12s.
+# Reaped correctly, the summary must show ~12s total for this step; a reaper
+# that double-counts retried steps finishes the stale entry early (with
+# another step's exit code) and reports only ~1s.
+cat > "$WORK/retry_slow.sh" <<'EOF'
+#!/bin/bash
+if [ -f retry_slow.marker ]; then
+    echo "retry_slow ok on long retry"
+    sleep 12
+    exit 0
+fi
+touch retry_slow.marker
+echo "retry_slow failing fast"
+exit 7
+EOF
+
+# A quiet 1s step used as the reaping partner of retry_slow.sh.
+cat > "$WORK/wait_a_bit.sh" <<'EOF'
+#!/bin/bash
+sleep 1
+exit 0
+EOF
+
+# Fails if it inherits the orchestrator's lock descriptor.
+cat > "$WORK/fdcheck.sh" <<'EOF'
+#!/bin/bash
+for fd in /proc/$$/fd/*; do
+    case "$(readlink "$fd" 2>/dev/null)" in
+        *".aidev_update.lock")
+            echo "lock fd leaked into step"
+            exit 1
+            ;;
+    esac
+done
+echo "no lock fd leak"
+exit 0
+EOF
 chmod +x "$WORK"/*.sh
 
 python3 - "$WORK/aidev_update.sh" <<'PY'
@@ -144,6 +204,12 @@ new = '''STEPS=(
     "script|flaky.sh|Flaky Step"
     "script|gate_a.sh|Gate A Step"
     "script|gate_b.sh|Gate B Step"
+    "script|twin_a.sh|Twin A Step"
+    "script|twin_b.sh|Twin B Step"
+    "script|treestep.sh|Tree Step"
+    "script|retry_slow.sh|Retry Slow Step"
+    "script|wait_a_bit.sh|Wait A Bit Step"
+    "script|fdcheck.sh|Fd Check Step"
     "cmd|echo hello-from-cmd|Cmd OK Step"
     "cmd|definitely_missing_cmd --x|Missing Cmd Step"
     "script|missing_script.sh|Missing Script Step"
@@ -180,6 +246,7 @@ check_contains "--list shows skip reason" "script not found" "$WORK/list.out"
 
 run bash aidev_update.sh --only nomatchxyz > "$WORK/nomatch.out" 2>&1
 check_eq "no-match exits 2" 2 "$?"
+check_contains "no-match lists available steps" "Available steps" "$WORK/nomatch.out"
 
 run bash aidev_update.sh --jobs 0 > "$WORK/badjobs.out" 2>&1
 check_eq "--jobs 0 rejected" 2 "$?"
@@ -274,6 +341,39 @@ run env AIDEV_TIMEOUT=10 timeout 60 bash aidev_update.sh --jobs 3 --only "Gate" 
 check_eq "--jobs 3 gate run exits 0" 0 "$?"
 check_contains "parallel summary keeps all steps" "Gate B Step" "$WORK/par3.out"
 
+echo "== parallel exit-code attribution =="
+# Twins exit 10/20 at the same instant; run several rounds because the old
+# wait-n-based reaper misattributed codes only when reaping raced.
+for iter in 1 2 3 4 5 6; do
+    run env AIDEV_TIMEOUT=30 timeout 60 bash aidev_update.sh --jobs 2 --only Twin \
+        > "$WORK/twins.out" 2>&1
+    a_line=$(awk '/^Twin A Step/ && NF>=4' "$WORK/twins.out")
+    b_line=$(awk '/^Twin B Step/ && NF>=4' "$WORK/twins.out")
+    if printf '%s' "$a_line" | grep -qE ' 10 *$' && printf '%s' "$b_line" | grep -qE ' 20 *$'; then
+        pass "twin exit codes attributed correctly (round $iter)"
+    else
+        fail "twin exit codes attributed correctly (round $iter: A='$a_line' B='$b_line')"
+    fi
+done
+
+echo "== parallel retry keeps job slots =="
+# retry_slow fails instantly and its successful retry takes 12s; wait_a_bit
+# finishes after 1s. Correct reaping attributes each exit code to its own
+# step, so retry_slow's total must be ~12s. A reaper that double-counts the
+# retried index finishes the stale entry with wait_a_bit's status after ~1s.
+rm -f "$WORK/retry_slow.marker"
+run env AIDEV_TIMEOUT=30 AIDEV_RETRIES=2 timeout 90 \
+    bash aidev_update.sh --jobs 2 --only "Retry Slow" --only "Wait A Bit" > "$WORK/retryslots.out" 2>&1
+check_eq "retry run exits 0" 0 "$?"
+check_contains "retry slow succeeded" "✓ Retry Slow Step completed successfully" "$WORK/retryslots.out"
+check_contains "wait a bit succeeded" "✓ Wait A Bit Step completed successfully" "$WORK/retryslots.out"
+rs_secs=$(awk '/^Retry Slow Step/ && NF>=4 {print $(NF-1)}' "$WORK/retryslots.out" | tr -d 's')
+if [ -n "$rs_secs" ] && [ "$rs_secs" -ge 10 ] 2>/dev/null; then
+    pass "retry total spans the long second attempt (${rs_secs}s)"
+else
+    fail "retry total spans the long second attempt (got '${rs_secs}s')"
+fi
+
 echo "== concurrency lock =="
 start_bg env AIDEV_TIMEOUT=30 bash aidev_update.sh --only "Sig Step"
 first=$BG_PID
@@ -326,6 +426,43 @@ else
     check_eq "SIGINT exit code is 130" 130 "$?"
 fi
 for p in $(pgrep -f '[s]igstep\.sh'); do kill -9 "$p" 2>/dev/null; done
+
+echo "== signal kills the whole step tree =="
+rm -f "$WORK/tree-child.pid"
+start_bg env AIDEV_TIMEOUT=120 AIDEV_KILL_AFTER=2 bash aidev_update.sh --only "Tree Step"
+orch=$BG_PID
+sleep 1
+tree_child=$(cat "$WORK/tree-child.pid" 2>/dev/null || echo "")
+kill -TERM "$orch"
+for _ in $(seq 1 100); do kill -0 "$orch" 2>/dev/null || break; sleep 0.1; done
+wait "$orch" 2>/dev/null
+if [ -n "$tree_child" ] && kill -0 "$tree_child" 2>/dev/null; then
+    fail "grandchild process cleaned up after SIGTERM"
+    kill -9 "$tree_child" 2>/dev/null
+else
+    pass "grandchild process cleaned up after SIGTERM"
+fi
+
+echo "== parallel temp dir cleaned up on signal =="
+mkdir -p "$WORK/tmp"
+start_bg env TMPDIR="$WORK/tmp" AIDEV_TIMEOUT=120 AIDEV_KILL_AFTER=2 \
+    bash aidev_update.sh --jobs 2 --only "Tree Step" --only "Sig Step"
+orch=$BG_PID
+sleep 1
+kill -TERM "$orch"
+for _ in $(seq 1 100); do kill -0 "$orch" 2>/dev/null || break; sleep 0.1; done
+wait "$orch" 2>/dev/null
+if [ -z "$(ls -A "$WORK/tmp" 2>/dev/null)" ]; then
+    pass "temp dir removed after SIGTERM"
+else
+    fail "temp dir removed after SIGTERM (leftover: $(find "$WORK/tmp" -mindepth 1 | tr '\n' ' '))"
+fi
+for p in $(pgrep -f '[s]igstep\.sh'); do kill -9 "$p" 2>/dev/null; done
+
+echo "== lock fd not inherited by steps =="
+run env AIDEV_TIMEOUT=30 timeout 60 bash aidev_update.sh --only "Fd Check" > "$WORK/fdcheck.out" 2>&1
+check_eq "fdcheck step succeeds" 0 "$?"
+check_contains "no lock fd leak reported" "no lock fd leak" "$WORK/fdcheck.out"
 
 echo "== no tee fallback =="
 FAKE_BIN="$WORK/fakebin"

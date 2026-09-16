@@ -1,5 +1,53 @@
 # Release Notes
 
+## 2026-09-16 (v1.2.1)
+
+### Orchestrator correctness fixes (`aidev_update.sh`)
+
+Contributed by **qwen/qwen3.8-max-0902**.
+
+**Fixes**
+
+- **Parallel mode attributed exit codes to the wrong steps.** `wait -n` returns
+  the status of *some* finished job, and the follow-up `kill -0` sweep picked
+  the first dead pid in flight order — not necessarily the same process. When
+  two steps finished simultaneously, their exit codes (and thus pass/fail,
+  retries and the summary) could be swapped. Each parallel step now runs inside
+  a wrapper subshell that records its exact exit code in a per-step rc file,
+  and reaping polls those files, so attribution is exact by construction. As a
+  side effect, the log `tee` job can no longer be mistaken for a finished step.
+- **Parallel retries re-ran the wrong command.** A retry relaunched whatever
+  `STEP_CMD` held at retry time — the *last resolved* step, not the failed one
+  (a latent bug since v1.2.0, previously masked because retries were only
+  exercised on single-step selections). Steps are now resolved per launch, so
+  a retry always re-runs its own step; if it vanished meanwhile, the retry is
+  reported as un-runnable instead of silently running something else.
+- **A retried step double-counted its job slot** (its index stayed in the
+  in-flight list twice), silently reducing parallelism under `--jobs`. Finished
+  indices are now removed before the retry relaunches them.
+- **The concurrency lock fd leaked into every step.** Children inherited fd 8,
+  so a daemon left behind by a step (e.g. Gastown/Headroom services) could hold
+  the flock after the run ended and wedge all future runs with "another run is
+  in progress". Steps are now spawned with `8>&-`.
+- **Signals only killed direct children**, orphaning grandchildren such as the
+  `npm` processes an updater spawns, and (in parallel mode) the wrapper's inner
+  process. The handler now kills the whole descendant tree, deepest first,
+  escalating to `SIGKILL` on the same schedule as before.
+- **The parallel-mode temp dir leaked on signal-interrupted runs**; it is now
+  removed via the `EXIT` trap.
+- Misconfiguration warnings (`AIDEV_TIMEOUT` & co.) are printed once logging is
+  engaged, so they are captured in the run log instead of only on the terminal.
+
+**Improvements**
+
+- A `--only`/`--skip` filter that matches nothing now lists the available
+  steps before exiting `2`.
+- `aidev_update.sh` is shellcheck-clean at `-S style`; the parallel executor no
+  longer uses `wait -n` at all.
+- Test suite grew from 53 to 68 checks, including regressions for every fix
+  above (simultaneous-finish attribution, retry duration/attribution, lock-fd
+  inheritance, process-tree cleanup, temp-dir cleanup).
+
 ## 2026-09-16 (v1.2.0)
 
 ### Orchestrator review fixes & parallel execution (`aidev_update.sh`)
