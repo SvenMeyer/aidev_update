@@ -28,7 +28,11 @@ if command -v readlink >/dev/null 2>&1; then
 fi
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 
-VERSION="1.3.0"
+VERSION="1.4.0"
+
+# Captured before option parsing consumes "$@", so the run log can record how
+# the run was actually invoked.
+RUN_ARGV=("$@")
 
 # The script relies on bash 4.4+ features (case-folding, empty-array expansion
 # under 'set -u'). Fail fast with a clear message instead of a syntax error.
@@ -47,8 +51,8 @@ if ! sleep 0.1 >/dev/null 2>&1; then
 fi
 
 # Defaults are applied here; the values themselves are sanitized by
-# validate_env right before logging starts, so misconfiguration warnings are
-# captured in the run log as well as on the terminal.
+# validate_env once, right after option parsing. Warnings are queued rather
+# than printed so they land in the run log as well as on the terminal.
 AIDEV_TIMEOUT="${AIDEV_TIMEOUT:-600}"
 
 # Seconds to wait after SIGTERM before killing a hung step. timeout(1) exits
@@ -90,6 +94,9 @@ validate_env() {
 # Format: "kind|target|description"
 #   kind=script  target is a sibling updater script (run with bash)
 #   kind=cmd     target is a shell command (word-split into argv)
+#   kind=sh      target is a shell snippet (evaluated with bash -c)
+#
+# Any other kind is reported as a configuration error rather than guessed at.
 #
 # Note: 'cmd' targets are split on whitespace only. Quoting, escapes and paths
 # containing spaces are NOT supported; use a small wrapper script for those.
@@ -132,6 +139,51 @@ DISABLED_STEPS=(
 )
 
 # ---------------------------------------------------------------------------
+# Optional external step table
+#
+# Keeping the list in a file makes enabling or disabling a tool a local config
+# change instead of a diff against the orchestrator itself. The arrays above
+# are the fallback when no config file is present, so the default install
+# stays zero-config.
+# ---------------------------------------------------------------------------
+STEPS_SOURCE="built-in step table"
+
+# Replace STEPS from the given file. Returns 1 (leaving STEPS untouched) when
+# the file yields no usable entries.
+load_steps_file() {
+    local file="$1" line kind target description
+    local lineno=0
+    local -a loaded=()
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        lineno=$((lineno + 1))
+        line="${line%$'\r'}"                       # tolerate CRLF
+        line="${line#"${line%%[![:space:]]*}"}"     # strip leading blanks
+        [ -z "$line" ] && continue
+        [ "${line:0:1}" = "#" ] && continue
+
+        IFS='|' read -r kind target description <<< "$line"
+        if [ -z "$kind" ] || [ -z "$target" ] || [ -z "${description:-}" ]; then
+            EARLY_WARNINGS+=("⚠ Ignoring malformed step at $file:$lineno (expected kind|target|description).")
+            continue
+        fi
+        loaded+=("$kind|$target|$description")
+    done < "$file"
+
+    if [ "${#loaded[@]}" -eq 0 ]; then
+        EARLY_WARNINGS+=("⚠ No usable steps in $file; using the built-in step table.")
+        return 1
+    fi
+
+    STEPS=("${loaded[@]}")
+    # The file is the whole truth about which steps exist; carrying the
+    # built-in "disabled" list alongside it would just be confusing.
+    DISABLED_STEPS=()
+    STEPS_SOURCE="$file"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -151,6 +203,8 @@ Options:
   -t, --timeout SECONDS   Per-step timeout in seconds (default: 600; 0 disables).
   -k, --kill-after SECS   Grace period after SIGTERM before SIGKILL (default: 10).
   -r, --retries N         Attempts per failed step (default: 1, i.e. no retry).
+  --require LIST          Comma/space separated tools that must exist before
+                          anything runs; missing ones abort with exit 4.
   --no-log                Disable writing to a run log file.
   --log-dir DIR           Directory for run logs (default: <script dir>/logs).
   --dry-run               Show which steps would run (and which would be skipped),
@@ -167,6 +221,18 @@ Notes:
     'open' can match several steps at once.
   - 'cmd' steps are split on whitespace only. 'sh' steps are evaluated with
     bash -c (supporting quotes, pipes and flags).
+  - npm and curl are only advisory: a missing tool is reported, but it aborts
+    the run only when named by --require / AIDEV_REQUIRE.
+  - A 'steps.conf' next to the script (or AIDEV_STEPS_FILE) replaces the
+    built-in step table. Format is one 'kind|target|description' per line;
+    blank lines and '#' comments are ignored.
+
+Exit codes:
+  0  every attempted step succeeded (skipped steps are allowed)
+  1  one or more steps failed or timed out
+  2  invalid usage, or no step matched the --only/--skip filters
+  3  another run is already in progress
+  4  a tool named by --require / AIDEV_REQUIRE is missing
 
 Environment:
   AIDEV_TIMEOUT              Per-step timeout in seconds (default: 600).
@@ -175,6 +241,10 @@ Environment:
                              (default: 10).
   AIDEV_RETRIES              Attempts per failed step (default: 1, i.e. no
                              retry). Only non-zero exits are retried.
+  AIDEV_REQUIRE              Comma/space separated tools that must exist
+                             before anything runs (default: none).
+  AIDEV_STEPS_FILE           Step table to use instead of the built-in one
+                             (default: <script dir>/steps.conf when present).
   AIDEV_LOG_DIR              Directory for run logs (default: <script dir>/logs).
   AIDEV_LOG_RETENTION_DAYS   Delete run logs older than this many days
                              (default: 30; 0 disables pruning).
@@ -217,8 +287,9 @@ matches_patterns() {
 }
 
 # Poll until PID exits or the timeout (seconds) elapses. Returns 1 on timeout.
-# Note: this only sees processes that are still unreaped; it is not used to
-# detect job completion (zombies still answer 'kill -0'), only to bound waits.
+# Note: bash reaps its own background children as they exit, so 'kill -0'
+# starts failing as soon as the child is gone, before any explicit 'wait'.
+# This is used only to bound waits, never to collect a step's exit status.
 wait_for_pid() {
     local pid="$1" limit="${2:-5}"
     local ticks="$limit"
@@ -237,8 +308,11 @@ STEP_CMD=()
 STEP_SKIP_REASON=""
 
 # Globals set by classify_rc / execute_step.
+# STEP_SECONDS covers every attempt of a step; STEP_ATTEMPT_SECONDS covers only
+# the last one, which is what the timeout summary line reports.
 STEP_STATUS=""
 STEP_SECONDS=0
+STEP_ATTEMPT_SECONDS=0
 STEP_RC=0
 
 # Resolve a step into a runnable argv in STEP_CMD. Returns 0 if it can run, or
@@ -287,7 +361,7 @@ resolve_step() {
             return 1
         fi
         STEP_CMD=(bash -c "$target")
-    else
+    elif [ "$kind" = "script" ]; then
         local script_path="$target"
         [[ "$script_path" != /* ]] && script_path="$SCRIPT_DIR/$target"
         if [ ! -f "$script_path" ]; then
@@ -299,6 +373,11 @@ resolve_step() {
             return 1
         fi
         STEP_CMD=(bash "$script_path")
+    else
+        # A typo in the step table must name itself, not masquerade as a
+        # missing script.
+        STEP_SKIP_REASON="unknown step kind: $kind"
+        return 1
     fi
     return 0
 }
@@ -312,116 +391,70 @@ JOBS=1
 LIST_ONLY=0
 DRY_RUN=0
 
+# Option-parsing helpers. Every value-taking option needs the same three
+# checks; keeping them in one place is what stops the '--opt value' and
+# '--opt=value' spellings from drifting apart.
+die_usage() {
+    echo "$1" >&2
+    echo "Run '$(basename "$0") --help' for usage." >&2
+    exit 2
+}
+
+require_value() {
+    [ "$2" -gt 0 ] || die_usage "Missing value for $1"
+}
+
+require_nonempty() {
+    [ -n "$2" ] || die_usage "Option $1 requires a non-empty argument"
+}
+
+require_uint() {
+    local opt="$1" val="$2" min="${3:-0}"
+    [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge "$min" ] || \
+        die_usage "$opt must be a whole number >= $min"
+}
+
 while [ $# -gt 0 ]; do
-    case "$1" in
-        --only)
-            shift
-            if [ $# -eq 0 ] || [ -z "$1" ]; then echo "Option --only requires a non-empty argument" >&2; exit 2; fi
-            ONLY_PATTERNS+=("$1")
+    opt="$1"
+    val=""
+    has_val=0
+
+    # Split '--opt=value' (and '-t=value') once, so the two spellings of an
+    # option share a single implementation below.
+    case "$opt" in
+        --*=*|-[tkr]=*)
+            val="${opt#*=}"
+            opt="${opt%%=*}"
+            has_val=1
             ;;
-        --only=*)
-            val="${1#*=}"
-            if [ -z "$val" ]; then echo "Option --only requires a non-empty argument" >&2; exit 2; fi
-            ONLY_PATTERNS+=("$val")
-            ;;
-        --skip)
-            shift
-            if [ $# -eq 0 ] || [ -z "$1" ]; then echo "Option --skip requires a non-empty argument" >&2; exit 2; fi
-            SKIP_PATTERNS+=("$1")
-            ;;
-        --skip=*)
-            val="${1#*=}"
-            if [ -z "$val" ]; then echo "Option --skip requires a non-empty argument" >&2; exit 2; fi
-            SKIP_PATTERNS+=("$val")
-            ;;
-        --jobs)
-            shift
-            if [ $# -eq 0 ]; then echo "Missing value for --jobs" >&2; exit 2; fi
-            if ! [[ "$1" =~ ^[0-9]+$ ]] || [ "$1" -lt 1 ]; then
-                echo "--jobs must be a positive whole number" >&2
-                exit 2
+    esac
+
+    # Options that take a value pull it from the next argument unless it
+    # already arrived in '=value' form.
+    case "$opt" in
+        --only|--skip|--jobs|-t|--timeout|-k|--kill-after|-r|--retries|--log-dir|--require)
+            if [ "$has_val" -eq 0 ]; then
+                require_value "$opt" $(($# - 1))
+                val="$2"
+                shift
             fi
-            JOBS="$1"
             ;;
-        --jobs=*)
-            val="${1#*=}"
-            if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -lt 1 ]; then
-                echo "--jobs must be a positive whole number" >&2
-                exit 2
-            fi
-            JOBS="$val"
-            ;;
-        -t|--timeout)
-            shift
-            if [ $# -eq 0 ]; then echo "Missing value for --timeout" >&2; exit 2; fi
-            if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-                echo "--timeout must be a non-negative whole number" >&2
-                exit 2
-            fi
-            AIDEV_TIMEOUT="$1"
-            ;;
-        --timeout=*|-t=*)
-            val="${1#*=}"
-            if ! [[ "$val" =~ ^[0-9]+$ ]]; then
-                echo "--timeout must be a non-negative whole number" >&2
-                exit 2
-            fi
-            AIDEV_TIMEOUT="$val"
-            ;;
-        -k|--kill-after)
-            shift
-            if [ $# -eq 0 ]; then echo "Missing value for --kill-after" >&2; exit 2; fi
-            if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-                echo "--kill-after must be a non-negative whole number" >&2
-                exit 2
-            fi
-            AIDEV_KILL_AFTER="$1"
-            ;;
-        --kill-after=*|-k=*)
-            val="${1#*=}"
-            if ! [[ "$val" =~ ^[0-9]+$ ]]; then
-                echo "--kill-after must be a non-negative whole number" >&2
-                exit 2
-            fi
-            AIDEV_KILL_AFTER="$val"
-            ;;
-        -r|--retries)
-            shift
-            if [ $# -eq 0 ]; then echo "Missing value for --retries" >&2; exit 2; fi
-            if ! [[ "$1" =~ ^[0-9]+$ ]] || [ "$1" -lt 1 ]; then
-                echo "--retries must be a positive whole number" >&2
-                exit 2
-            fi
-            AIDEV_RETRIES="$1"
-            ;;
-        --retries=*|-r=*)
-            val="${1#*=}"
-            if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -lt 1 ]; then
-                echo "--retries must be a positive whole number" >&2
-                exit 2
-            fi
-            AIDEV_RETRIES="$val"
-            ;;
-        --no-log)
-            AIDEV_NO_LOG=1
-            ;;
-        --log-dir)
-            shift
-            if [ $# -eq 0 ] || [ -z "$1" ]; then echo "Missing value for --log-dir" >&2; exit 2; fi
-            AIDEV_LOG_DIR="$1"
-            ;;
-        --log-dir=*)
-            val="${1#*=}"
-            if [ -z "$val" ]; then echo "Missing value for --log-dir" >&2; exit 2; fi
-            AIDEV_LOG_DIR="$val"
-            ;;
-        -v|--version)
-            echo "aidev_update.sh v${VERSION}"
-            exit 0
-            ;;
-        --dry-run) DRY_RUN=1 ;;
-        --list) LIST_ONLY=1 ;;
-        -h|--help) usage; exit 0 ;;
+    esac
+
+    case "$opt" in
+        --only)          require_nonempty "$opt" "$val"; ONLY_PATTERNS+=("$val") ;;
+        --skip)          require_nonempty "$opt" "$val"; SKIP_PATTERNS+=("$val") ;;
+        --jobs)          require_uint "$opt" "$val" 1; JOBS="$val" ;;
+        -t|--timeout)    require_uint "$opt" "$val" 0; AIDEV_TIMEOUT="$val" ;;
+        -k|--kill-after) require_uint "$opt" "$val" 0; AIDEV_KILL_AFTER="$val" ;;
+        -r|--retries)    require_uint "$opt" "$val" 1; AIDEV_RETRIES="$val" ;;
+        --log-dir)       require_nonempty "$opt" "$val"; AIDEV_LOG_DIR="$val" ;;
+        --require)       require_nonempty "$opt" "$val"; AIDEV_REQUIRE="$val" ;;
+        --no-log)        AIDEV_NO_LOG=1 ;;
+        --dry-run)       DRY_RUN=1 ;;
+        --list)          LIST_ONLY=1 ;;
+        -v|--version)    echo "aidev_update.sh v${VERSION}"; exit 0 ;;
+        -h|--help)       usage; exit 0 ;;
         --)
             shift
             while [ $# -gt 0 ]; do
@@ -431,21 +464,33 @@ while [ $# -gt 0 ]; do
             break
             ;;
         -*)
-            echo "Unknown option: $1" >&2
-            echo "Run '$(basename "$0") --help' for usage." >&2
-            exit 2
+            die_usage "Unknown option: $1"
             ;;
-        *) ONLY_PATTERNS+=("$1") ;;
+        *) ONLY_PATTERNS+=("$opt") ;;
     esac
     shift
 done
 
+# Sanitize the tunables once, before anything consumes them (prune_logs reads
+# AIDEV_LOG_RETENTION_DAYS later); warnings are replayed once logging is up.
 validate_env
+
+if [ -n "${AIDEV_STEPS_FILE:-}" ]; then
+    if [ ! -f "$AIDEV_STEPS_FILE" ]; then
+        echo "❌ AIDEV_STEPS_FILE not found: $AIDEV_STEPS_FILE" >&2
+        exit 2
+    fi
+    load_steps_file "$AIDEV_STEPS_FILE" || true
+elif [ -f "$SCRIPT_DIR/steps.conf" ]; then
+    load_steps_file "$SCRIPT_DIR/steps.conf" || true
+fi
 
 if [ "$LIST_ONLY" -eq 1 ]; then
     if [ ${#EARLY_WARNINGS[@]} -gt 0 ]; then
         printf '%s\n' "${EARLY_WARNINGS[@]}" >&2
     fi
+    echo "Steps from: $STEPS_SOURCE"
+    echo ""
     echo "Enabled steps:"
     for entry in "${STEPS[@]}"; do
         IFS='|' read -r kind target description <<< "$entry"
@@ -456,12 +501,14 @@ if [ "$LIST_ONLY" -eq 1 ]; then
         fi
         printf '  %-28s %-46s [%s]\n' "$target" "$description" "$state"
     done
-    echo ""
-    echo "Disabled steps (kept for reference; move a line into STEPS to enable):"
-    for entry in "${DISABLED_STEPS[@]}"; do
-        IFS='|' read -r _ target description <<< "$entry"
-        printf '  %-28s %s\n' "$target" "$description"
-    done
+    if [ ${#DISABLED_STEPS[@]} -gt 0 ]; then
+        echo ""
+        echo "Disabled steps (kept for reference; move a line into STEPS to enable):"
+        for entry in "${DISABLED_STEPS[@]}"; do
+            IFS='|' read -r _ target description <<< "$entry"
+            printf '  %-28s %s\n' "$target" "$description"
+        done
+    fi
     exit 0
 fi
 
@@ -541,7 +588,7 @@ if command_exists flock; then
             else
                 echo "❌ Another aidev_update.sh run is in progress (lock: $LOCK_FILE)." >&2
             fi
-            exit 1
+            exit 3
         fi
     else
         echo "⚠ Cannot open lock file ($LOCK_FILE); continuing without a concurrency guard." >&2
@@ -616,6 +663,9 @@ on_signal() {
 }
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
+# Without this, closing a terminal or SSH session kills the run outright: steps
+# keep running, the log FIFO is never flushed and temp dirs are left behind.
+trap 'on_signal 129' HUP
 
 # ---------------------------------------------------------------------------
 # Logging: tee all output to a log file. A FIFO is used (rather than process
@@ -682,10 +732,6 @@ prune_logs() {
         -mtime +"$days" -delete 2>/dev/null || true
 }
 
-# Sanitize tunables before anything consumes them (prune_logs reads
-# AIDEV_LOG_RETENTION_DAYS below); warnings are replayed once logging is up.
-validate_env
-
 if [ "${AIDEV_NO_LOG:-0}" != "1" ]; then
     if ! command_exists mkfifo || ! command_exists tee; then
         echo "⚠ mkfifo/tee not available; logging disabled." >&2
@@ -718,27 +764,59 @@ if [ ${#EARLY_WARNINGS[@]} -gt 0 ]; then
 fi
 
 RUN_STARTED=$(date '+%Y-%m-%d %H:%M:%S')
+RUN_HOST="$(hostname 2>/dev/null || uname -n 2>/dev/null || echo unknown)"
+# Recorded so a log read weeks later still says which orchestrator produced it,
+# where, and with which arguments.
 echo "AIDev update run started: $RUN_STARTED"
+printf 'Version:  %s\n' "$VERSION"
+printf 'Host:     %s\n' "$RUN_HOST"
+printf 'Command:  %s\n' "$(basename "$0") ${RUN_ARGV[*]+${RUN_ARGV[*]}}"
+printf 'Steps:    %s\n' "$STEPS_SOURCE"
 if [ -n "$LOG_FILE" ]; then
-    echo "Log file: $LOG_FILE"
+    printf 'Log file: %s\n' "$LOG_FILE"
 fi
 
 # ---------------------------------------------------------------------------
-# Core dependency check
+# Dependency check
+#
+# The orchestrator itself needs nothing beyond coreutils: npm, curl and friends
+# are needs of individual updater scripts, and which ones matter depends on
+# which steps were selected. So the common tools are only advisory here (a step
+# that truly needs one fails on its own, with its own message), while
+# --require / AIDEV_REQUIRE lets a caller demand tools up front and abort with
+# exit 4 when they are absent.
 # ---------------------------------------------------------------------------
 echo ""
 echo "Checking dependencies..."
+
+required_deps=()
+if [ -n "${AIDEV_REQUIRE:-}" ]; then
+    # Accept commas or whitespace as separators.
+    IFS=', ' read -ra required_deps <<< "$AIDEV_REQUIRE"
+fi
+
+missing_required=()
+for dep in ${required_deps[@]+"${required_deps[@]}"}; do
+    [ -n "$dep" ] || continue
+    command_exists "$dep" || missing_required+=("$dep")
+done
+
+if [ ${#missing_required[@]} -ne 0 ]; then
+    echo "❌ Missing required dependencies: ${missing_required[*]}"
+    echo "Please install the missing dependencies and try again."
+    exit 4
+fi
+
 missing_deps=()
 for dep in npm curl; do
     command_exists "$dep" || missing_deps+=("$dep")
 done
 
 if [ ${#missing_deps[@]} -ne 0 ]; then
-    echo "❌ Missing required dependencies: ${missing_deps[*]}"
-    echo "Please install the missing dependencies and try again."
-    exit 1
+    echo "⚠ Not found: ${missing_deps[*]} — steps that need them will fail."
+else
+    echo "✓ All common dependencies found"
 fi
-echo "✓ All dependencies found"
 
 # ---------------------------------------------------------------------------
 # Preflight: report steps that cannot run before we start updating anything.
@@ -911,7 +989,7 @@ run_steps_parallel() {
     # flight) counts as not finished yet. Returns 1 when nothing finished, so
     # callers can sleep between polls.
     reap_finished() {
-        local ridx frc i c
+        local ridx frc wrc i c
         local -a done_idx=() done_rc=() still_live=() kept=()
         for ridx in "${live[@]}"; do
             frc=""
@@ -919,6 +997,17 @@ run_steps_parallel() {
             if [ -n "$frc" ]; then
                 done_idx+=("$ridx")
                 done_rc+=("$frc")
+            elif ! kill -0 "${p_pid[ridx]}" 2>/dev/null; then
+                # The wrapper vanished without recording an exit code: killed
+                # (OOM, a stray SIGKILL) or unable to write its rc file. Fall
+                # back to the wrapper's own status so a missing rc file cannot
+                # wedge this poll loop forever. Testing the rc file first is
+                # what makes that safe: the rc write happens before the
+                # wrapper exits, so a real exit code is never lost here.
+                wrc=0
+                wait "${p_pid[ridx]}" 2>/dev/null || wrc=$?
+                done_idx+=("$ridx")
+                done_rc+=("$wrc")
             else
                 still_live+=("$ridx")
             fi
@@ -1043,10 +1132,18 @@ done
 header_fmt="%-${col_w}s %-8s %-7s %-5s\n"
 printf -v dashes '%*s' "$col_w" ''
 dashes="${dashes// /-}"
-printf "$header_fmt" "Step" "Status" "Time" "Exit"
-printf "$header_fmt" "$dashes" "------" "----" "----"
+
+# The format string is built from $col_w (an integer) a few lines up, never
+# from step data, so the usual printf-format warning does not apply.
+summary_row() {
+    # shellcheck disable=SC2059
+    printf "$header_fmt" "$1" "$2" "$3" "$4"
+}
+
+summary_row "Step" "Status" "Time" "Exit"
+summary_row "$dashes" "------" "----" "----"
 for i in "${!RESULT_NAMES[@]}"; do
-    printf "$header_fmt" "${RESULT_NAMES[$i]}" "${RESULT_STATUS[$i]}" "${RESULT_SECONDS[$i]}s" "${RESULT_RC[$i]:--}"
+    summary_row "${RESULT_NAMES[$i]}" "${RESULT_STATUS[$i]}" "${RESULT_SECONDS[$i]}s" "${RESULT_RC[$i]:--}"
 done
 
 echo ""

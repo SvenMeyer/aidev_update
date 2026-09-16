@@ -22,9 +22,12 @@ summary is printed and the exit code reflects whether anything failed.
 - **coreutils** (`timeout`, `mkfifo`, `tee`) for per-step timeouts and logging
 - **flock** (optional) to prevent two runs from racing the package managers
 
-`aidev_update.sh` checks for **npm** and **curl** up front and exits `1` if either
-is missing. Remaining tools are checked by the individual update scripts, and
-per-step prerequisites (a missing command or missing script) are reported in a
+`aidev_update.sh` reports missing **npm** / **curl** up front but does not abort
+on them: they are needs of individual updater scripts, and which ones matter
+depends on which steps were selected, so a step that truly needs one fails on
+its own with its own message. Use `--require npm,curl` (or `AIDEV_REQUIRE`) to
+demand tools up front instead — a missing one then aborts with exit `4`.
+Per-step prerequisites (a missing command or missing script) are reported in a
 preflight pass and skipped rather than failing the run. Logging is
 self-disabling: if `mkfifo` or `tee` is unavailable, the run continues without a
 log file instead of hanging.
@@ -54,7 +57,7 @@ and printed when the step finishes, so parallel logs stay readable and the
 summary keeps the configured step order. On retries, output from previous
 attempts is preserved rather than overwritten.
 
-Only one run may be active at a time. A second run exits `1` with the holding
+Only one run may be active at a time. A second run exits `3` with the holding
 PID and lock path if `flock` is available; without `flock` the guard is skipped.
 
 ### Options and Environment Variables
@@ -66,6 +69,8 @@ Every setting can be specified via a command-line flag or an environment variabl
 | `-t, --timeout SECS`   | `AIDEV_TIMEOUT`           | `600`               | Per-step timeout in seconds (`0` disables it)   |
 | `-k, --kill-after SECS`| `AIDEV_KILL_AFTER`        | `10`                | Grace period after SIGTERM before SIGKILL       |
 | `-r, --retries N`      | `AIDEV_RETRIES`           | `1`                 | Attempts per failed step (no retry by default)  |
+| `--require LIST`       | `AIDEV_REQUIRE`           | unset               | Tools that must exist up front (else exit `4`)  |
+| (env only)             | `AIDEV_STEPS_FILE`        | `<script dir>/steps.conf` | Step table to use instead of the built-in one |
 | `--log-dir DIR`        | `AIDEV_LOG_DIR`           | `<script dir>/logs` | Directory for run logs                          |
 | (env only)             | `AIDEV_LOG_RETENTION_DAYS`| `30`                | Delete run logs older than this (`0` = keep all)|
 | `--no-log`             | `AIDEV_NO_LOG`            | unset               | Set to `1` to disable logging                   |
@@ -82,8 +87,13 @@ so a step that ignores SIGTERM is eventually killed instead of blocking the run.
 A step that exits `124`/`137` on its own is reported as a failure, not as a timeout.
 On `SIGINT`/`SIGTERM` the running steps — and their whole descendant trees, e.g. `npm`
 children — receive termination signals simultaneously and the script exits
-`130`/`143` respectively. The lock descriptor is never inherited by spawned steps,
-so daemons a step leaves behind cannot hold the concurrency lock after the run ends.
+`130`/`143` respectively; `SIGHUP` is handled the same way (exit `129`), so
+closing a terminal or SSH session still cleans up. The lock descriptor is never
+inherited by spawned steps, so daemons a step leaves behind cannot hold the
+concurrency lock after the run ends.
+
+Each run header records the orchestrator version, host and invoking command
+line, so an old log still says what produced it.
 
 ## Tools Managed
 
@@ -114,6 +124,24 @@ to re-enable one.
 
 ## Adding or changing steps
 
+### Without editing the script
+
+Put a `steps.conf` next to `aidev_update.sh` (or point `AIDEV_STEPS_FILE` at a
+file elsewhere) and it replaces the built-in table entirely — local tool choices
+then stay out of the script's own diff:
+
+```
+# One "kind|target|description" per line. Blank lines and # comments ignored.
+script|grok_update.sh|Grok CLI Update
+cmd|claude update|Claude Code CLI Update
+```
+
+Malformed lines are reported and skipped; if the file yields no usable entries,
+the built-in table is used instead. `--list` shows which table is in effect.
+Setting `AIDEV_STEPS_FILE` to a path that does not exist is an error (exit `2`).
+
+### By editing the script
+
 Steps live in two arrays at the top of `aidev_update.sh`:
 
 ```bash
@@ -129,6 +157,9 @@ Each entry is `kind|target|description`:
 - `kind=script` — `target` is an updater script (relative to script dir or absolute), run with `bash`.
 - `kind=cmd` — `target` is a command line, split on whitespace and run directly.
 - `kind=sh` — `target` is a shell expression evaluated with `bash -c`, supporting quotes, pipes, and flags.
+
+Any other `kind` is reported as `unknown step kind: <kind>` and skipped, rather
+than being guessed at as a script path.
 
 To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 
@@ -156,7 +187,10 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
   end
 - **Run logging** — full output tee'd to a timestamped log file, with retention
   pruning and a safe fallback when `tee` is unavailable
-- **Honest exit code** — non-zero when any step failed
+- **External step table** — an optional `steps.conf` keeps local tool choices
+  out of the script itself
+- **Honest exit code** — distinct codes for step failures, usage errors, lock
+  contention and missing required tools
 
 ## Testing
 
@@ -165,14 +199,26 @@ stub steps and checks selection, dry-run, timeouts, exit-code classification,
 retries, parallel runs (including exit-code attribution when steps finish
 simultaneously), skip handling, logging, the concurrency lock (including that
 steps never inherit the lock fd), signal handling (including process-tree and
-temp-dir cleanup) and the no-`tee`/no-`timeout` fallbacks:
+temp-dir cleanup), external step tables, the advisory dependency check and the
+no-`tee`/no-`timeout` fallbacks:
 
 ```bash
 ./tests/orchestrator_test.sh
 ```
 
+The suite also lints both scripts with `shellcheck` when it is available; set
+`SHELLCHECK=/path/to/shellcheck` to point at a non-PATH install. Without it the
+lint stage reports a skip rather than failing:
+
+```bash
+SHELLCHECK="$(command -v shellcheck)" ./tests/orchestrator_test.sh
+```
+
 ## Exit Codes
 
 - `0` — every attempted step succeeded (skipped steps are allowed)
-- `1` — missing core dependencies, a concurrent run is active, or one or more steps failed/timed out
-- `2` — invalid command-line usage, or no step matched the `--only`/`--skip` filters
+- `1` — one or more steps failed or timed out
+- `2` — invalid command-line usage, no step matched the `--only`/`--skip`
+  filters, or `AIDEV_STEPS_FILE` points at a missing file
+- `3` — another run is already in progress
+- `4` — a tool named by `--require` / `AIDEV_REQUIRE` is missing

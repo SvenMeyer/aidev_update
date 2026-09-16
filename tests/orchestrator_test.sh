@@ -22,9 +22,11 @@ trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 PASS=0
 FAIL=0
+SKIP=0
 
 pass() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL + 1)); }
+skip() { echo "  - $1 (skipped)"; SKIP=$((SKIP + 1)); }
 
 check_eq() {
     local desc="$1" expected="$2" actual="$3"
@@ -174,6 +176,14 @@ sleep 1
 exit 0
 EOF
 
+# Long-running step whose wrapper subshell is SIGKILLed mid-run by the
+# killed-wrapper test: the wrapper never gets to record an exit code.
+cat > "$WORK/killable.sh" <<'EOF'
+#!/bin/bash
+echo "killable.sh running"
+sleep 20
+EOF
+
 # Fails if it inherits the orchestrator's lock descriptor.
 cat > "$WORK/fdcheck.sh" <<'EOF'
 #!/bin/bash
@@ -210,6 +220,8 @@ new = '''STEPS=(
     "script|retry_slow.sh|Retry Slow Step"
     "script|wait_a_bit.sh|Wait A Bit Step"
     "script|fdcheck.sh|Fd Check Step"
+    "script|killable.sh|Killable Step"
+    "bogus|ok.sh|Bogus Kind Step"
     "cmd|echo hello-from-cmd|Cmd OK Step"
     "sh|echo hello-from-sh 'with spaces'|Sh OK Step"
     "cmd|definitely_missing_cmd --x|Missing Cmd Step"
@@ -235,11 +247,11 @@ start_bg() {
 echo "== basic options =="
 run bash aidev_update.sh --version > "$WORK/ver.out" 2>&1
 check_eq "--version exits 0" 0 "$?"
-check_contains "--version outputs v1.3.0" "v1.3.0" "$WORK/ver.out"
+check_contains "--version outputs v1.4.0" "v1.4.0" "$WORK/ver.out"
 
 run bash aidev_update.sh -v > "$WORK/ver_short.out" 2>&1
 check_eq "-v exits 0" 0 "$?"
-check_contains "-v outputs v1.3.0" "v1.3.0" "$WORK/ver_short.out"
+check_contains "-v outputs v1.4.0" "v1.4.0" "$WORK/ver_short.out"
 
 run bash aidev_update.sh --help > "$WORK/help.out" 2>&1
 check_eq "--help exits 0" 0 "$?"
@@ -407,7 +419,7 @@ start_bg env AIDEV_TIMEOUT=30 bash aidev_update.sh --only "Sig Step"
 first=$BG_PID
 sleep 1
 run bash aidev_update.sh --only "OK Step" > "$WORK/lock2.out" 2>&1
-check_eq "second concurrent run exits 1" 1 "$?"
+check_eq "second concurrent run exits 3" 3 "$?"
 check_contains "second run names the lock" "in progress" "$WORK/lock2.out"
 check_contains "second run identifies holding pid" "held by PID $first" "$WORK/lock2.out"
 kill -TERM "$first" 2>/dev/null
@@ -550,8 +562,192 @@ else
     pass "stale fifo pruned"
 fi
 
+echo "== lint (shellcheck) =="
+# Optional: honours $SHELLCHECK, then PATH. Skips (does not fail) when absent
+# so the suite still runs on machines without it.
+SHELLCHECK="${SHELLCHECK:-$(command -v shellcheck 2>/dev/null || true)}"
+if [ -n "$SHELLCHECK" ] && [ -x "$SHELLCHECK" ]; then
+    if "$SHELLCHECK" -s bash "$REPO_DIR/aidev_update.sh" > "$WORK/lint.out" 2>&1; then
+        pass "aidev_update.sh is shellcheck clean"
+    else
+        fail "aidev_update.sh is shellcheck clean"
+        sed -n '1,40p' "$WORK/lint.out" | sed 's/^/      /'
+    fi
+    if "$SHELLCHECK" -s bash "$REPO_DIR/tests/orchestrator_test.sh" > "$WORK/lint2.out" 2>&1; then
+        pass "orchestrator_test.sh is shellcheck clean"
+    else
+        fail "orchestrator_test.sh is shellcheck clean"
+        sed -n '1,40p' "$WORK/lint2.out" | sed 's/^/      /'
+    fi
+else
+    skip "shellcheck lint (binary not found; set \$SHELLCHECK to enable)"
+fi
+
+echo "== unknown step kind =="
+run bash aidev_update.sh --list > "$WORK/kindlist.out" 2>&1
+check_contains "unknown kind reported by --list" "unknown step kind: bogus" "$WORK/kindlist.out"
+run bash aidev_update.sh --dry-run --only "Bogus Kind Step" > "$WORK/kinddry.out" 2>&1
+check_contains "unknown kind skipped in dry-run" "unknown step kind: bogus" "$WORK/kinddry.out"
+check_absent "unknown kind never resolved as a script" "would run" "$WORK/kinddry.out"
+
+echo "== dependency gate is advisory =="
+DEPBIN="$WORK/depbin"
+mkdir -p "$DEPBIN"
+# 'echo' is included as a real binary: the substring match on "OK Step" also
+# selects the cmd-kind step, which timeout(1) has to exec from PATH. 'type -P'
+# rather than 'command -v' because the latter answers with the builtin name
+# for echo, which would link the name to itself.
+for b in dirname date mkdir rm find timeout sleep kill flock mkfifo bash cat awk sed grep tee pgrep ps readlink basename uname hostname env echo; do
+    src="$(type -P "$b" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "$DEPBIN/$b"
+done
+rm -f "$DEPBIN/npm" "$DEPBIN/curl"
+
+timeout 60 env PATH="$DEPBIN" AIDEV_NO_LOG=1 bash "$WORK/aidev_update.sh" \
+    --only "OK Step" > "$WORK/nodeps.out" 2>&1
+check_eq "missing npm/curl does not block unrelated steps" 0 "$?"
+check_contains "missing tools reported as a warning" "npm" "$WORK/nodeps.out"
+check_contains "step still runs without npm" "OK Step completed successfully" "$WORK/nodeps.out"
+
+timeout 60 env PATH="$DEPBIN" AIDEV_NO_LOG=1 AIDEV_REQUIRE=npm,curl \
+    bash "$WORK/aidev_update.sh" --only "OK Step" > "$WORK/reqdeps.out" 2>&1
+check_eq "AIDEV_REQUIRE makes a missing tool fatal (exit 4)" 4 "$?"
+check_contains "required dependency named" "npm" "$WORK/reqdeps.out"
+
+timeout 60 env PATH="$DEPBIN" AIDEV_NO_LOG=1 bash "$WORK/aidev_update.sh" \
+    --require npm --only "OK Step" > "$WORK/reqflag.out" 2>&1
+check_eq "--require makes a missing tool fatal (exit 4)" 4 "$?"
+
+echo "== option parsing regressions =="
+run bash aidev_update.sh --timeout > "$WORK/opt1.out" 2>&1
+check_eq "--timeout without a value rejected" 2 "$?"
+run bash aidev_update.sh --log-dir= > "$WORK/opt2.out" 2>&1
+check_eq "--log-dir= with empty value rejected" 2 "$?"
+run bash aidev_update.sh --frobnicate > "$WORK/opt3.out" 2>&1
+check_eq "unknown option rejected" 2 "$?"
+check_contains "unknown option names itself" "Unknown option: --frobnicate" "$WORK/opt3.out"
+run bash aidev_update.sh -t=15 -k=3 -r=2 --dry-run --only "OK Step" > "$WORK/opt4.out" 2>&1
+check_eq "short =value forms accepted" 0 "$?"
+run bash aidev_update.sh --kill-after abc > "$WORK/opt5.out" 2>&1
+check_eq "--kill-after abc rejected" 2 "$?"
+run bash aidev_update.sh --jobs > "$WORK/opt6.out" 2>&1
+check_eq "--jobs without a value rejected" 2 "$?"
+
+echo "== tunable warnings printed once =="
+run env AIDEV_TIMEOUT=abc AIDEV_NO_LOG=1 timeout 60 bash aidev_update.sh \
+    --only "OK Step" > "$WORK/warnonce.out" 2>&1
+warn_count=$(grep -c 'AIDEV_TIMEOUT must be' "$WORK/warnonce.out" || true)
+check_eq "invalid AIDEV_TIMEOUT warned exactly once" 1 "$warn_count"
+
+echo "== SIGHUP cleanup =="
+rm -f "$WORK/tree-child.pid"
+start_bg env AIDEV_TIMEOUT=120 AIDEV_KILL_AFTER=2 bash aidev_update.sh --only "Tree Step"
+orch=$BG_PID
+sleep 1
+tree_child=$(cat "$WORK/tree-child.pid" 2>/dev/null || echo "")
+kill -HUP "$orch"
+for _ in $(seq 1 100); do kill -0 "$orch" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$orch" 2>/dev/null; then
+    fail "SIGHUP terminates the orchestrator"
+    kill -9 "$orch" 2>/dev/null
+else
+    wait "$orch" 2>/dev/null
+    check_eq "SIGHUP exit code is 129" 129 "$?"
+fi
+if [ -n "$tree_child" ] && kill -0 "$tree_child" 2>/dev/null; then
+    fail "SIGHUP cleans up the step tree"
+    kill -9 "$tree_child" 2>/dev/null
+else
+    pass "SIGHUP cleans up the step tree"
+fi
+
+echo "== log header provenance =="
+run timeout 60 bash aidev_update.sh --only "OK Step" > "$WORK/prov.out" 2>&1
+check_eq "provenance run exits 0" 0 "$?"
+check_contains "header reports version" "Version:" "$WORK/prov.out"
+check_contains "header reports the running version" "1.4.0" "$WORK/prov.out"
+check_contains "header reports host" "Host:" "$WORK/prov.out"
+check_contains "header reports the command line" "--only OK Step" "$WORK/prov.out"
+prov_log=$(find "$WORK/logs" -maxdepth 1 -type f -name 'aidev-*.log' 2>/dev/null | sort | tail -1)
+if [ -n "$prov_log" ] && grep -qF "Version:" "$prov_log"; then
+    pass "provenance lands in the log file"
+else
+    fail "provenance lands in the log file"
+fi
+
+echo "== script hygiene =="
+if grep -q '^STEP_ATTEMPT_SECONDS=0' "$REPO_DIR/aidev_update.sh"; then
+    pass "STEP_ATTEMPT_SECONDS declared with the step globals"
+else
+    fail "STEP_ATTEMPT_SECONDS declared with the step globals"
+fi
+check_absent "no stale zombie claim in the wait_for_pid comment" \
+    "zombies still answer" "$REPO_DIR/aidev_update.sh"
+
+echo "== parallel wrapper killed does not hang =="
+start_bg env AIDEV_NO_LOG=1 AIDEV_TIMEOUT=60 AIDEV_KILL_AFTER=2 \
+    bash aidev_update.sh --jobs 2 --only "Killable Step" --only "Wait A Bit Step"
+orch=$BG_PID
+sleep 3
+# SIGKILL the surviving wrapper subshell: it dies before recording an exit
+# code, so the reaper must notice the dead pid instead of polling forever.
+for c in $(pgrep -P "$orch" 2>/dev/null); do
+    case "$(ps -o cmd= -p "$c" 2>/dev/null)" in
+        *aidev_update.sh*) kill -9 "$c" 2>/dev/null ;;
+    esac
+done
+hang_deadline=$((SECONDS + 30))
+while kill -0 "$orch" 2>/dev/null && [ "$SECONDS" -lt "$hang_deadline" ]; do sleep 0.2; done
+if kill -0 "$orch" 2>/dev/null; then
+    fail "killed wrapper does not wedge the run (still running after 30s)"
+    kill -9 "$orch" 2>/dev/null
+    wait "$orch" 2>/dev/null
+else
+    wait "$orch" 2>/dev/null
+    check_eq "killed wrapper makes the run fail rather than hang" 1 "$?"
+    check_contains "killed step reported as a failure" \
+        "Killable Step failed" "$WORK/bg.out"
+fi
+for p in $(pgrep -f '[k]illable\.sh'); do kill -9 "$p" 2>/dev/null; done
+
+echo "== external steps.conf =="
+CFG="$WORK/cfgdir"
+mkdir -p "$CFG"
+cp "$WORK/aidev_update.sh" "$CFG/aidev_update.sh"
+cp "$WORK/ok.sh" "$CFG/ok.sh"
+cat > "$CFG/steps.conf" <<'EOF'
+# Comment lines and blank lines are ignored.
+
+script|ok.sh|Config OK Step
+cmd|echo from-config|Config Cmd Step
+this-line-is-malformed
+EOF
+( cd "$CFG" && timeout 30 bash aidev_update.sh --list ) > "$WORK/cfglist.out" 2>&1
+check_eq "steps.conf --list exits 0" 0 "$?"
+check_contains "steps.conf entries are used" "Config OK Step" "$WORK/cfglist.out"
+check_contains "steps.conf source is reported" "steps.conf" "$WORK/cfglist.out"
+check_absent "embedded step table is replaced" "Fail Step" "$WORK/cfglist.out"
+check_contains "malformed config line is reported" "malformed step" "$WORK/cfglist.out"
+
+( cd "$CFG" && AIDEV_NO_LOG=1 timeout 30 bash aidev_update.sh --only "Config Cmd" ) \
+    > "$WORK/cfgrun.out" 2>&1
+check_eq "steps.conf run exits 0" 0 "$?"
+check_contains "steps.conf step actually runs" "from-config" "$WORK/cfgrun.out"
+
+cat > "$WORK/alt-steps.conf" <<'EOF'
+cmd|echo from-alt-config|Alt Config Step
+EOF
+run env AIDEV_STEPS_FILE="$WORK/alt-steps.conf" AIDEV_NO_LOG=1 timeout 30 \
+    bash aidev_update.sh > "$WORK/altcfg.out" 2>&1
+check_eq "AIDEV_STEPS_FILE run exits 0" 0 "$?"
+check_contains "AIDEV_STEPS_FILE steps are used" "from-alt-config" "$WORK/altcfg.out"
+
+run env AIDEV_STEPS_FILE="$WORK/definitely-missing.conf" timeout 30 \
+    bash aidev_update.sh --list > "$WORK/missingcfg.out" 2>&1
+check_eq "missing AIDEV_STEPS_FILE rejected" 2 "$?"
+check_contains "missing AIDEV_STEPS_FILE named" "definitely-missing.conf" "$WORK/missingcfg.out"
+
 echo ""
 echo "====================================="
-echo "Tests passed: $PASS  failed: $FAIL"
+echo "Tests passed: $PASS  failed: $FAIL  skipped: $SKIP"
 echo "====================================="
 [ "$FAIL" -eq 0 ]

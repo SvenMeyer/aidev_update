@@ -1,5 +1,65 @@
 # Release Notes
 
+## 2026-09-16 (v1.4.0)
+
+### Review follow-ups: parallel hang, exit codes, external step table (`aidev_update.sh`)
+
+Contributed by **Opus 5**. Every item below was filed as a GitHub issue
+(#1–#12), covered by a test that failed first, then fixed.
+
+**Fixes**
+
+- **Parallel mode could hang forever (#1).** `reap_finished` treated a step as
+  finished only when its wrapper had written an `.rc` file. A wrapper killed
+  before that write — OOM killer, a stray `SIGKILL`, a vanished temp dir, a full
+  disk — left the index in `live` forever and the drain loop spun on
+  `sleep 0.1` indefinitely. Reproduced against a sandbox copy: the run was still
+  spinning 25s after the kill, long past the step's own runtime. The reaper now
+  also notices a dead wrapper pid and falls back to the wrapper's own exit
+  status. Checking the rc file first keeps this safe, because the rc write
+  happens before the wrapper exits.
+- **Unknown step kinds masqueraded as missing scripts (#2).** A typo such as
+  `scrpit|foo.sh|Foo` fell through to the script branch and was reported as
+  `script not found`, blaming the file rather than the config. Unknown kinds are
+  now reported as `unknown step kind: <kind>`.
+- **`SIGHUP` was not trapped (#6).** Closing a terminal or SSH session killed the
+  run outright: steps kept running, the log FIFO was never flushed and temp dirs
+  were left behind. `SIGHUP` now follows the same path as `SIGINT`/`SIGTERM`,
+  exiting `129`.
+
+**Changes**
+
+- **The dependency gate is advisory (#3).** `npm` and `curl` were required
+  unconditionally, so one missing tool aborted every unrelated update — even
+  `--only repowise`. Missing common tools are now reported and the run
+  continues; `--require npm,curl` / `AIDEV_REQUIRE` demands tools up front and
+  aborts with exit `4`.
+- **Distinct exit codes (#7).** Exit `1` previously covered missing
+  dependencies, lock contention and step failures alike. Lock contention is now
+  `3`, missing required tools `4`, and `1` means "a step failed".
+- **External step table (#12).** An optional `steps.conf` next to the script (or
+  `AIDEV_STEPS_FILE`) replaces the built-in list, so local tool choices no
+  longer show up as diffs against the orchestrator. Malformed lines are reported
+  and skipped; `--list` shows which table is in effect.
+- **Run header records provenance (#8).** Version, host, invoking command line
+  and step-table source are logged, so an old log still says what produced it.
+- **Option parsing deduplicated (#4).** Roughly 130 lines of near-identical
+  `--opt` / `--opt=value` blocks collapsed into three helpers, removing the
+  drift risk between the two spellings of each option. CLI behaviour is
+  unchanged.
+- **`validate_env` is called once (#5)**, with a comment explaining why the call
+  has to precede `prune_logs`.
+
+**Housekeeping**
+
+- `STEP_ATTEMPT_SECONDS` is declared with the other step globals (#9).
+- Corrected the `wait_for_pid` comment (#10): bash reaps its own background
+  children, so `kill -0` starts failing as soon as a child exits — the claim
+  that zombies still answer it was wrong, and it argued against the fix for #1.
+- The test suite lints both scripts with `shellcheck` when available and skips
+  cleanly when not (#11); `aidev_update.sh` is now lint-clean.
+- Test suite grew from 101 to 130 assertions.
+
 ## 2026-09-16 (v1.3.0)
 
 ### Orchestrator review fixes, ergonomics & log isolation (`aidev_update.sh`)

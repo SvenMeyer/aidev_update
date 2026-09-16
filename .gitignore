@@ -9,3 +9,6 @@ logs/
 
 # Concurrency lock
 .aidev_update.lock
+
+# Local step table (overrides the built-in one when present)
+steps.conf
