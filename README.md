@@ -7,15 +7,15 @@ to date through a single command.
 
 ## Overview
 
-`aidev_update.sh` runs a configurable list of updater steps in sequence. Each
-step is either a sibling `*_update.sh` script or a bare command such as
-`claude update`. A failure in one step does not stop the rest of the run; every
-step is attempted, then a summary is printed and the exit code reflects whether
-anything failed.
+`aidev_update.sh` runs a configurable list of updater steps — sequentially by
+default, or up to N at a time with `--jobs N`. Each step is either a sibling
+`*_update.sh` script or a bare command such as `claude update`. A failure in
+one step does not stop the rest of the run; every step is attempted, then a
+summary is printed and the exit code reflects whether anything failed.
 
 ## Prerequisites
 
-- **bash** (the orchestration script and the individual updaters)
+- **bash** >= 4.4 (the orchestration script and the individual updaters)
 - **npm** (used by several npm-based tool updaters)
 - **curl** (used by several download-based updaters)
 - **pipx** and **python3** (for the Python-based tools: mini-swe-agent, headroom)
@@ -36,13 +36,19 @@ log file instead of hanging.
 ./aidev_update.sh --only grok         # run only matching step(s)
 ./aidev_update.sh grok                # positional names work like --only
 ./aidev_update.sh --skip gastown      # run everything except matching step(s)
+./aidev_update.sh --jobs 4            # run up to 4 steps at the same time
 ./aidev_update.sh --dry-run           # show what would run, change nothing
-./aidev_update.sh --list              # list enabled and disabled steps
+./aidev_update.sh --list              # list steps and their availability
 ./aidev_update.sh --help              # full usage
 ```
 
 Matching is a case-insensitive substring test against a step's target and
-description, so `--only gastown` selects both the Gastown and Gastown GUI steps.
+description, so `--only gastown` selects both the Gastown and Gastown GUI steps,
+and a broad pattern such as `--only open` matches several steps at once.
+
+With `--jobs N` up to N steps run concurrently; each step's output is buffered
+and printed when the step finishes, so parallel logs stay readable and the
+summary keeps the configured step order.
 
 Only one run may be active at a time. A second run exits `1` with a message if
 `flock` is available; without `flock` the guard is skipped.
@@ -51,8 +57,9 @@ Only one run may be active at a time. A second run exits `1` with a message if
 
 | Variable                     | Default             | Purpose                                        |
 | ---------------------------- | ------------------- | ---------------------------------------------- |
-| `AIDEV_TIMEOUT`              | `600`               | Per-step timeout in seconds                    |
+| `AIDEV_TIMEOUT`              | `600`               | Per-step timeout in seconds (`0` disables it)  |
 | `AIDEV_KILL_AFTER`           | `10`                | Grace period after SIGTERM before SIGKILL      |
+| `AIDEV_RETRIES`              | `1`                 | Attempts per failed step (no retry by default) |
 | `AIDEV_LOG_DIR`              | `<script dir>/logs` | Directory for run logs                         |
 | `AIDEV_LOG_RETENTION_DAYS`   | `30`                | Delete run logs older than this (`0` = keep all)|
 | `AIDEV_NO_LOG`               | unset               | Set to `1` to disable logging                  |
@@ -63,8 +70,9 @@ piped elsewhere. Old logs are pruned after each run according to
 `AIDEV_LOG_RETENTION_DAYS`.
 
 Steps are run under `timeout --kill-after` so a step that ignores SIGTERM is
-eventually killed instead of blocking the run. On `SIGINT`/`SIGTERM` the running
-step is terminated and the script exits `130`.
+eventually killed instead of blocking the run. A step that exits `124`/`137` on
+its own is reported as a failure, not as a timeout. On `SIGINT`/`SIGTERM` the
+running steps are terminated and the script exits `130`/`143` respectively.
 
 ## Tools Managed
 
@@ -118,15 +126,20 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 - **Declarative step list** — add, remove, reorder, or toggle a step in one line
 - **Preflight checks** — missing commands or scripts are reported before the run
 - **Subset selection** — `--only`, `--skip`, and positional name filters
-- **Dry run** — `--dry-run` resolves every selected step and reports it without
-  changing anything
+- **Dry run** — `--dry-run` resolves every selected step, reports it and shows
+  the exact argv that would run
+- **Parallel runs** — `--jobs N` runs steps concurrently with buffered,
+  non-interleaved output
+- **Retries** — `AIDEV_RETRIES` retries a step that exits non-zero
 - **Error isolation** — one failed update does not stop the others
 - **Per-step timeout** — `timeout --kill-after` stops even a SIGTERM-ignoring
   updater from blocking the run
-- **Signal handling** — `SIGINT`/`SIGTERM` terminate the running step and exit
-  `130`
-- **Concurrency guard** — `flock` prevents two runs from clashing
-- **Timing and summary** — per-step status and duration table at the end
+- **Signal handling** — `SIGINT`/`SIGTERM` terminate the running steps and exit
+  `130`/`143`
+- **Concurrency guard** — `flock` prevents two runs from clashing; a read-only
+  install directory only disables the guard instead of aborting
+- **Timing and summary** — per-step status, duration and exit-code table at the
+  end
 - **Run logging** — full output tee'd to a timestamped log file, with retention
   pruning and a safe fallback when `tee` is unavailable
 - **Honest exit code** — non-zero when any step failed
@@ -134,8 +147,9 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 ## Testing
 
 `tests/orchestrator_test.sh` builds a throwaway copy of the orchestrator with
-stub steps and checks selection, dry-run, timeouts, skip handling, logging, the
-concurrency lock, signal handling and the no-`tee` fallback:
+stub steps and checks selection, dry-run, timeouts, exit-code classification,
+retries, parallel runs, skip handling, logging, the concurrency lock, signal
+handling and the no-`tee`/no-`timeout` fallbacks:
 
 ```bash
 ./tests/orchestrator_test.sh
