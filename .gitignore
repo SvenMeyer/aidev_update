@@ -6,3 +6,6 @@
 
 # Run logs
 logs/
+
+# Concurrency lock
+.aidev_update.lock

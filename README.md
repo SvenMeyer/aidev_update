@@ -20,11 +20,14 @@ anything failed.
 - **curl** (used by several download-based updaters)
 - **pipx** and **python3** (for the Python-based tools: mini-swe-agent, headroom)
 - **coreutils** (`timeout`, `mkfifo`, `tee`) for per-step timeouts and logging
+- **flock** (optional) to prevent two runs from racing the package managers
 
 `aidev_update.sh` checks for **npm** and **curl** up front and exits `1` if either
 is missing. Remaining tools are checked by the individual update scripts, and
 per-step prerequisites (a missing command or missing script) are reported in a
-preflight pass and skipped rather than failing the run.
+preflight pass and skipped rather than failing the run. Logging is
+self-disabling: if `mkfifo` or `tee` is unavailable, the run continues without a
+log file instead of hanging.
 
 ## Usage
 
@@ -33,6 +36,7 @@ preflight pass and skipped rather than failing the run.
 ./aidev_update.sh --only grok         # run only matching step(s)
 ./aidev_update.sh grok                # positional names work like --only
 ./aidev_update.sh --skip gastown      # run everything except matching step(s)
+./aidev_update.sh --dry-run           # show what would run, change nothing
 ./aidev_update.sh --list              # list enabled and disabled steps
 ./aidev_update.sh --help              # full usage
 ```
@@ -40,17 +44,27 @@ preflight pass and skipped rather than failing the run.
 Matching is a case-insensitive substring test against a step's target and
 description, so `--only gastown` selects both the Gastown and Gastown GUI steps.
 
+Only one run may be active at a time. A second run exits `1` with a message if
+`flock` is available; without `flock` the guard is skipped.
+
 ### Environment variables
 
-| Variable         | Default                  | Purpose                                  |
-| ---------------- | ------------------------ | ---------------------------------------- |
-| `AIDEV_TIMEOUT`  | `600`                    | Per-step timeout in seconds              |
-| `AIDEV_LOG_DIR`  | `<script dir>/logs`      | Directory for run logs                   |
-| `AIDEV_NO_LOG`   | unset                    | Set to `1` to disable logging            |
+| Variable                     | Default             | Purpose                                        |
+| ---------------------------- | ------------------- | ---------------------------------------------- |
+| `AIDEV_TIMEOUT`              | `600`               | Per-step timeout in seconds                    |
+| `AIDEV_KILL_AFTER`           | `10`                | Grace period after SIGTERM before SIGKILL      |
+| `AIDEV_LOG_DIR`              | `<script dir>/logs` | Directory for run logs                         |
+| `AIDEV_LOG_RETENTION_DAYS`   | `30`                | Delete run logs older than this (`0` = keep all)|
+| `AIDEV_NO_LOG`               | unset               | Set to `1` to disable logging                  |
 
 Each run is logged to `logs/aidev-<timestamp>-<pid>.log` (git-ignored). A FIFO is
 used for logging so terminal and log ordering stay correct even when output is
-piped elsewhere.
+piped elsewhere. Old logs are pruned after each run according to
+`AIDEV_LOG_RETENTION_DAYS`.
+
+Steps are run under `timeout --kill-after` so a step that ignores SIGTERM is
+eventually killed instead of blocking the run. On `SIGINT`/`SIGTERM` the running
+step is terminated and the script exits `130`.
 
 ## Tools Managed
 
@@ -93,7 +107,9 @@ STEPS=(
 Each entry is `kind|target|description`:
 
 - `kind=script` — `target` is a sibling updater script, run with `bash`.
-- `kind=cmd` — `target` is a command line, run directly.
+- `kind=cmd` — `target` is a command line, split on whitespace and run directly.
+  Quoting, escapes and paths with spaces are not supported; use a small wrapper
+  script for those.
 
 To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 
@@ -102,14 +118,31 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 - **Declarative step list** — add, remove, reorder, or toggle a step in one line
 - **Preflight checks** — missing commands or scripts are reported before the run
 - **Subset selection** — `--only`, `--skip`, and positional name filters
+- **Dry run** — `--dry-run` resolves every selected step and reports it without
+  changing anything
 - **Error isolation** — one failed update does not stop the others
-- **Per-step timeout** — a hung updater cannot block the whole run
+- **Per-step timeout** — `timeout --kill-after` stops even a SIGTERM-ignoring
+  updater from blocking the run
+- **Signal handling** — `SIGINT`/`SIGTERM` terminate the running step and exit
+  `130`
+- **Concurrency guard** — `flock` prevents two runs from clashing
 - **Timing and summary** — per-step status and duration table at the end
-- **Run logging** — full output tee'd to a timestamped log file
+- **Run logging** — full output tee'd to a timestamped log file, with retention
+  pruning and a safe fallback when `tee` is unavailable
 - **Honest exit code** — non-zero when any step failed
+
+## Testing
+
+`tests/orchestrator_test.sh` builds a throwaway copy of the orchestrator with
+stub steps and checks selection, dry-run, timeouts, skip handling, logging, the
+concurrency lock, signal handling and the no-`tee` fallback:
+
+```bash
+./tests/orchestrator_test.sh
+```
 
 ## Exit Codes
 
 - `0` — every attempted step succeeded (skipped steps are allowed)
-- `1` — missing core dependencies, no step matched the filters, or one or more steps failed/timed out
-- `2` — invalid command-line usage
+- `1` — missing core dependencies, a concurrent run is active, or one or more steps failed/timed out
+- `2` — invalid command-line usage, or no step matched the `--only`/`--skip` filters
