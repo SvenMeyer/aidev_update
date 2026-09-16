@@ -3,3 +3,6 @@
 .claude/
 .repowise/
 .neon
+
+# Run logs
+logs/

@@ -1,96 +1,115 @@
 # AI Dev Tools Update Script
 
-A comprehensive update script for managing multiple AI-powered development CLI tools.
+A small orchestrator that keeps a set of AI-powered development CLI tools up
+to date through a single command.
 
 > **Note:** This repository has only been tested on "plain" Linux (Manjaro Linux).
 
 ## Overview
 
-`aidev_update.sh` is a unified update manager that keeps your AI development tools up-to-date. It orchestrates updates for various AI coding assistants and related tools through a single command.
+`aidev_update.sh` runs a configurable list of updater steps in sequence. Each
+step is either a sibling `*_update.sh` script or a bare command such as
+`claude update`. A failure in one step does not stop the rest of the run; every
+step is attempted, then a summary is printed and the exit code reflects whether
+anything failed.
 
 ## Prerequisites
 
-- **npm** (Node Package Manager)
-- **curl** (for downloading updates)
-- **bash** (shell environment)
-- **pipx** (for the Python-based tools: mini-swe-agent, headroom)
-- **python3** (used by the pipx-based updaters)
+- **bash** (the orchestration script and the individual updaters)
+- **npm** (used by several npm-based tool updaters)
+- **curl** (used by several download-based updaters)
+- **pipx** and **python3** (for the Python-based tools: mini-swe-agent, headroom)
+- **coreutils** (`timeout`, `mkfifo`, `tee`) for per-step timeouts and logging
 
-`aidev_update.sh` checks for **npm** and **curl** before running and exits with an error if either is missing. The remaining tools are checked by the individual update scripts that need them, which fail with an actionable message if one is absent.
+`aidev_update.sh` checks for **npm** and **curl** up front and exits `1` if either
+is missing. Remaining tools are checked by the individual update scripts, and
+per-step prerequisites (a missing command or missing script) are reported in a
+preflight pass and skipped rather than failing the run.
 
 ## Usage
 
 ```bash
-./aidev_update.sh
+./aidev_update.sh                     # run every enabled step
+./aidev_update.sh --only grok         # run only matching step(s)
+./aidev_update.sh grok                # positional names work like --only
+./aidev_update.sh --skip gastown      # run everything except matching step(s)
+./aidev_update.sh --list              # list enabled and disabled steps
+./aidev_update.sh --help              # full usage
 ```
 
-The script will automatically:
-1. Verify all required dependencies
-2. Update each tool in sequence
-3. Display version information before and after updates
-4. Report success or failure for each tool
+Matching is a case-insensitive substring test against a step's target and
+description, so `--only gastown` selects both the Gastown and Gastown GUI steps.
+
+### Environment variables
+
+| Variable         | Default                  | Purpose                                  |
+| ---------------- | ------------------------ | ---------------------------------------- |
+| `AIDEV_TIMEOUT`  | `600`                    | Per-step timeout in seconds              |
+| `AIDEV_LOG_DIR`  | `<script dir>/logs`      | Directory for run logs                   |
+| `AIDEV_NO_LOG`   | unset                    | Set to `1` to disable logging            |
+
+Each run is logged to `logs/aidev-<timestamp>-<pid>.log` (git-ignored). A FIFO is
+used for logging so terminal and log ordering stay correct even when output is
+piped elsewhere.
 
 ## Tools Managed
 
-### Direct npm Installations
-- **OpenCode CLI** - `opencode-ai@latest`
-- **Qwen Code** - `@qwen-code/qwen-code@preview`
-- **llxprt-code** - `@vybestack/llxprt-code@latest` (Gemini CLI fork)
-- **justcode** - `@just-every/code`
-- **codebuff** - `codebuff`
+Enabled steps, in run order:
 
-### External Update Scripts
-- **Claude Code CLI** - `claude_update.sh`
-- **Claude Code Router** - `ccr_update.sh`
-- **CLIProxyAPI** - `cliproxyapi_update.sh`
-- **Gemini CLI** - `gemini_update.sh`
-- **OpenAI Codex** - `codex_update.sh`
-- **OpenSpec** - `openspec_update.sh`
-- **Amp Code** - `amp_update.sh`
-- **Taskmaster** - `tm_update.sh`
-- **Ollama** - `ollama_update.sh`
-- **mini-swe-agent** - `mini_swe_agent_update.sh`
+| Step                    | Kind        | Notes                              |
+| ----------------------- | ----------- | ---------------------------------- |
+| OpenSpec Update         | script      | `openspec_update.sh`               |
+| mini-swe-agent Update   | script      | pipx-based                         |
+| Claude Code CLI Update  | command     | `claude update`                    |
+| Grok CLI Update         | script      | `grok_update.sh`                   |
+| DROID CLI Update        | command     | `droid update`                     |
+| OpenAI Codex Update     | script      | `codex_update.sh`                  |
+| OpenCode CLI Update     | script      | `opencode_update.sh`               |
+| Entire Update           | script      | `entire_update.sh`                 |
+| Headroom Update         | script      | `headroom_update.sh`               |
+| Kilo Update             | script      | `kilo_update.sh`                   |
+| Beads Update            | script      | `beads_update.sh`                  |
+| Gastown Update          | script      | `gastown_update.sh`                |
+| Gastown GUI Update      | script      | `gastown_gui_update.sh`            |
+| Repowise Update         | script      | `repowise_update.sh`               |
 
-## Directory Structure
+Additional updater scripts exist in the repository but are disabled by default
+(Claude updater script, Copilot, CCR, Gemini, Qwen, Amp, LLxprt, JustCode,
+Codebuff, Taskmaster, CLIProxyAPI, Ollama). Run `./aidev_update.sh --list` to see
+them, and see "Adding or changing steps" below to re-enable one.
 
+## Adding or changing steps
+
+Steps live in two arrays at the top of `aidev_update.sh`:
+
+```bash
+STEPS=(
+    "script|openspec_update.sh|OpenSpec Update"
+    "cmd|claude update|Claude Code CLI Update"
+    ...
+)
 ```
-aidev_update/
-├── aidev_update.sh             # Main orchestration script
-├── claude_update.sh            # Claude CLI updater
-├── codex_update.sh             # OpenAI Codex updater
-├── ccr_update.sh               # Claude Code Router updater
-├── cliproxyapi_update.sh       # CLIProxyAPI updater
-├── gemini_update.sh            # Gemini CLI updater
-├── gemini_install.sh           # Gemini CLI installer
-├── openspec_update.sh          # OpenSpec updater
-├── amp_update.sh               # Amp Code updater
-├── tm_update.sh                # Taskmaster updater
-├── ollama_update.sh            # Ollama updater
-├── ollama_install.sh           # Ollama installer
-├── ollama_install_cached.sh    # Ollama installer (cached version)
-├── codebuff_update.sh          # Codebuff updater
-├── llxprt_update.sh            # llxprt-code updater
-├── opencode_update.sh          # OpenCode CLI updater
-├── justcode_update.sh          # justcode updater
-├── mini_swe_agent_update.sh    # mini-swe-agent installer/updater
-└── qwen_update.sh              # Qwen Code updater
-```
+
+Each entry is `kind|target|description`:
+
+- `kind=script` — `target` is a sibling updater script, run with `bash`.
+- `kind=cmd` — `target` is a command line, run directly.
+
+To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 
 ## Features
 
-- **Dependency Checking** - Validates required tools before execution
-- **Error Handling** - Continues execution even if individual updates fail
-- **Visual Feedback** - Clear status indicators (✓, ✗, ⚠) for each operation
-- **Version Reporting** - Shows before/after versions for npm-installed tools
-- **Modular Design** - Uses separate update scripts for complex tools
-
-## Error Handling
-
-- If dependencies are missing, the script exits with an error message
-- If an individual update script fails, it logs the failure and continues
-- If an npm package installation fails, it reports "Installation failed" for that tool
+- **Declarative step list** — add, remove, reorder, or toggle a step in one line
+- **Preflight checks** — missing commands or scripts are reported before the run
+- **Subset selection** — `--only`, `--skip`, and positional name filters
+- **Error isolation** — one failed update does not stop the others
+- **Per-step timeout** — a hung updater cannot block the whole run
+- **Timing and summary** — per-step status and duration table at the end
+- **Run logging** — full output tee'd to a timestamped log file
+- **Honest exit code** — non-zero when any step failed
 
 ## Exit Codes
 
-- `0` - All operations completed (individual tools may have failed)
-- `1` - Missing dependencies or critical error
+- `0` — every attempted step succeeded (skipped steps are allowed)
+- `1` — missing core dependencies, no step matched the filters, or one or more steps failed/timed out
+- `2` — invalid command-line usage
