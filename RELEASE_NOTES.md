@@ -1,5 +1,63 @@
 # Release Notes
 
+## 2026-09-16 (v1.3.0)
+
+### Orchestrator review fixes, ergonomics & log isolation (`aidev_update.sh`)
+
+Contributed by **google/gemini-3.8-flash (high)**.
+
+**Fixes**
+
+- **Parallel retries truncated and destroyed failure logs.** When a parallel
+  step failed and retried, `spawn_step` truncated the buffered output with `>`,
+  erasing the stdout/stderr explaining why the previous attempt failed. Output
+  is now appended across attempts with clear retry headers, keeping failure
+  diagnostics intact.
+- **Sequential kill escalation delayed signal handling under `--jobs`.** The
+  signal handler formerly iterated over running steps sequentially, waiting up
+  to `AIDEV_KILL_AFTER` seconds for child 1 before signalling child 2. The handler
+  now broadcasts `SIGTERM` to all running step trees simultaneously before
+  escalating to `SIGKILL` for stubborn survivors, preventing delayed Ctrl-C handling.
+- **Subprocesses inherited stdin.** Steps now execute with `< /dev/null`,
+  preventing background tasks under `--jobs` from receiving `SIGTTIN` or freezing
+  on unattended interactive prompts.
+- **Logging cleanup closed descriptors without restoration.** `cleanup_logging`
+  formerly closed stdout and stderr (`exec 1>&- 2>&-`), leaving bash with closed
+  descriptors and risking `Bad file descriptor` errors in subsequent commands or
+  traps. Original stdout/stderr descriptors are now preserved and restored.
+- **Concurrency lock now identifies the holding PID.** The holding PID is written
+  to the lock file upon acquiring flock; competing runs report which PID holds
+  the lock to simplify diagnosing wedged processes.
+- **Fixed banner typo**: Corrected `AEDev` to `AIDev` in the run header.
+- **Consistent timeout and duration reporting**: Both sequential and parallel
+  modes now report the attempt duration for timeouts, while total duration is
+  retained for ok/fail status and the summary table.
+- **Skip messaging in parallel mode**: Skipped steps now identify which step was
+  skipped rather than printing an uncontextualized skip reason.
+
+**Additions & Improvements**
+
+- **CLI flags for all environment tunables**: Added `-t`/`--timeout SECS`,
+  `-k`/`--kill-after SECS`, `-r`/`--retries N`, `--no-log`, `--log-dir DIR`,
+  `-v`/`--version`, and `--` option terminator. Empty `--only` and `--skip`
+  options are rejected with exit code 2.
+- **Arbitrary shell expressions (`kind=sh`)**: Added support for `kind=sh`
+  steps evaluated with `bash -c`, enabling inline quotes, pipes, and flags
+  without requiring wrapper scripts.
+- **Symlink resolution for `SCRIPT_DIR`**: Resolves symlinks so `aidev_update.sh`
+  can be symlinked into `$PATH` (e.g. `~/.local/bin`) without misresolving sibling
+  scripts or log paths.
+- **Stale FIFO cleanup**: `prune_logs` now removes orphaned `.aidev-*.fifo` files
+  older than 1 day left behind by killed runs.
+- **Registered `pi_update.sh`**: Added `Pi Coding Agent Update` to `DISABLED_STEPS`,
+  ensuring all 24 update scripts in the repository are accounted for.
+- **Summary improvements**: Step column width auto-sizes dynamically so long step
+  names do not misalign columns, total elapsed time is displayed, and multi-step
+  failures are formatted as a bulleted list.
+- **Test suite**: Expanded from 68 to 88 checks covering version flags, CLI option
+  validation, shell-step execution, PID lock reporting, parallel retry log preservation,
+  symlink execution, and FIFO pruning.
+
 ## 2026-09-16 (v1.2.1)
 
 ### Orchestrator correctness fixes (`aidev_update.sh`)

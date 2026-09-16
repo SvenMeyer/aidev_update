@@ -37,8 +37,11 @@ log file instead of hanging.
 ./aidev_update.sh grok                # positional names work like --only
 ./aidev_update.sh --skip gastown      # run everything except matching step(s)
 ./aidev_update.sh --jobs 4            # run up to 4 steps at the same time
+./aidev_update.sh --timeout 120       # 2 minute cap per step
+./aidev_update.sh --retries 2         # one extra try on failure
 ./aidev_update.sh --dry-run           # show what would run, change nothing
 ./aidev_update.sh --list              # list steps and their availability
+./aidev_update.sh --version           # print version information
 ./aidev_update.sh --help              # full usage
 ```
 
@@ -48,34 +51,39 @@ and a broad pattern such as `--only open` matches several steps at once.
 
 With `--jobs N` up to N steps run concurrently; each step's output is buffered
 and printed when the step finishes, so parallel logs stay readable and the
-summary keeps the configured step order.
+summary keeps the configured step order. On retries, output from previous
+attempts is preserved rather than overwritten.
 
-Only one run may be active at a time. A second run exits `1` with a message if
-`flock` is available; without `flock` the guard is skipped.
+Only one run may be active at a time. A second run exits `1` with the holding
+PID and lock path if `flock` is available; without `flock` the guard is skipped.
 
-### Environment variables
+### Options and Environment Variables
 
-| Variable                     | Default             | Purpose                                        |
-| ---------------------------- | ------------------- | ---------------------------------------------- |
-| `AIDEV_TIMEOUT`              | `600`               | Per-step timeout in seconds (`0` disables it)  |
-| `AIDEV_KILL_AFTER`           | `10`                | Grace period after SIGTERM before SIGKILL      |
-| `AIDEV_RETRIES`              | `1`                 | Attempts per failed step (no retry by default) |
-| `AIDEV_LOG_DIR`              | `<script dir>/logs` | Directory for run logs                         |
-| `AIDEV_LOG_RETENTION_DAYS`   | `30`                | Delete run logs older than this (`0` = keep all)|
-| `AIDEV_NO_LOG`               | unset               | Set to `1` to disable logging                  |
+Every setting can be specified via a command-line flag or an environment variable:
+
+| CLI Option             | Environment Variable      | Default             | Purpose                                         |
+| ---------------------- | ------------------------- | ------------------- | ----------------------------------------------- |
+| `-t, --timeout SECS`   | `AIDEV_TIMEOUT`           | `600`               | Per-step timeout in seconds (`0` disables it)   |
+| `-k, --kill-after SECS`| `AIDEV_KILL_AFTER`        | `10`                | Grace period after SIGTERM before SIGKILL       |
+| `-r, --retries N`      | `AIDEV_RETRIES`           | `1`                 | Attempts per failed step (no retry by default)  |
+| `--log-dir DIR`        | `AIDEV_LOG_DIR`           | `<script dir>/logs` | Directory for run logs                          |
+| (env only)             | `AIDEV_LOG_RETENTION_DAYS`| `30`                | Delete run logs older than this (`0` = keep all)|
+| `--no-log`             | `AIDEV_NO_LOG`            | unset               | Set to `1` to disable logging                   |
 
 Each run is logged to `logs/aidev-<timestamp>-<pid>.log` (git-ignored). A FIFO is
 used for logging so terminal and log ordering stay correct even when output is
-piped elsewhere. Old logs are pruned after each run according to
+piped elsewhere, and terminal descriptors are cleanly restored on shutdown. Old
+logs and stale FIFOs are pruned after each run according to
 `AIDEV_LOG_RETENTION_DAYS`.
 
-Steps are run under `timeout --kill-after` so a step that ignores SIGTERM is
-eventually killed instead of blocking the run. A step that exits `124`/`137` on
-its own is reported as a failure, not as a timeout. On `SIGINT`/`SIGTERM` the
-running steps — and their whole descendant trees, e.g. `npm` children — are
-terminated and the script exits `130`/`143` respectively. The lock descriptor
-is never inherited by spawned steps, so daemons a step leaves behind cannot
-hold the concurrency lock after the run ends.
+Steps run with stdin redirected from `/dev/null` so unattended or background jobs
+never freeze on prompts or `SIGTTIN`. Steps are run under `timeout --kill-after`
+so a step that ignores SIGTERM is eventually killed instead of blocking the run.
+A step that exits `124`/`137` on its own is reported as a failure, not as a timeout.
+On `SIGINT`/`SIGTERM` the running steps — and their whole descendant trees, e.g. `npm`
+children — receive termination signals simultaneously and the script exits
+`130`/`143` respectively. The lock descriptor is never inherited by spawned steps,
+so daemons a step leaves behind cannot hold the concurrency lock after the run ends.
 
 ## Tools Managed
 
@@ -100,8 +108,9 @@ Enabled steps, in run order:
 
 Additional updater scripts exist in the repository but are disabled by default
 (Claude updater script, Copilot, CCR, Gemini, Qwen, Amp, LLxprt, JustCode,
-Codebuff, Taskmaster, CLIProxyAPI, Ollama). Run `./aidev_update.sh --list` to see
-them, and see "Adding or changing steps" below to re-enable one.
+Codebuff, Taskmaster, CLIProxyAPI, Ollama, Pi Coding Agent). Run
+`./aidev_update.sh --list` to see them, and see "Adding or changing steps" below
+to re-enable one.
 
 ## Adding or changing steps
 
@@ -117,10 +126,9 @@ STEPS=(
 
 Each entry is `kind|target|description`:
 
-- `kind=script` — `target` is a sibling updater script, run with `bash`.
+- `kind=script` — `target` is an updater script (relative to script dir or absolute), run with `bash`.
 - `kind=cmd` — `target` is a command line, split on whitespace and run directly.
-  Quoting, escapes and paths with spaces are not supported; use a small wrapper
-  script for those.
+- `kind=sh` — `target` is a shell expression evaluated with `bash -c`, supporting quotes, pipes, and flags.
 
 To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 

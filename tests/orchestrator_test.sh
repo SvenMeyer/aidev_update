@@ -211,6 +211,7 @@ new = '''STEPS=(
     "script|wait_a_bit.sh|Wait A Bit Step"
     "script|fdcheck.sh|Fd Check Step"
     "cmd|echo hello-from-cmd|Cmd OK Step"
+    "sh|echo hello-from-sh 'with spaces'|Sh OK Step"
     "cmd|definitely_missing_cmd --x|Missing Cmd Step"
     "script|missing_script.sh|Missing Script Step"
 )'''
@@ -232,6 +233,14 @@ start_bg() {
 }
 
 echo "== basic options =="
+run bash aidev_update.sh --version > "$WORK/ver.out" 2>&1
+check_eq "--version exits 0" 0 "$?"
+check_contains "--version outputs v1.3.0" "v1.3.0" "$WORK/ver.out"
+
+run bash aidev_update.sh -v > "$WORK/ver_short.out" 2>&1
+check_eq "-v exits 0" 0 "$?"
+check_contains "-v outputs v1.3.0" "v1.3.0" "$WORK/ver_short.out"
+
 run bash aidev_update.sh --help > "$WORK/help.out" 2>&1
 check_eq "--help exits 0" 0 "$?"
 check_contains "--help documents --dry-run" "--dry-run" "$WORK/help.out"
@@ -251,12 +260,28 @@ check_contains "no-match lists available steps" "Available steps" "$WORK/nomatch
 run bash aidev_update.sh --jobs 0 > "$WORK/badjobs.out" 2>&1
 check_eq "--jobs 0 rejected" 2 "$?"
 
+run bash aidev_update.sh --timeout abc > "$WORK/badtimeout.out" 2>&1
+check_eq "--timeout abc rejected" 2 "$?"
+
+run bash aidev_update.sh --retries 0 > "$WORK/badretries.out" 2>&1
+check_eq "--retries 0 rejected" 2 "$?"
+
+run bash aidev_update.sh --only "" > "$WORK/emptyonly.out" 2>&1
+check_eq "empty --only rejected" 2 "$?"
+
+run bash aidev_update.sh --skip "" > "$WORK/emptyskip.out" 2>&1
+check_eq "empty --skip rejected" 2 "$?"
+
+run bash aidev_update.sh -t 120 -r 2 --dry-run -- "OK Step" > "$WORK/clitunables.out" 2>&1
+check_eq "cli tunables and dashdash accepted" 0 "$?"
+
 echo "== dry run =="
 run bash aidev_update.sh --dry-run > "$WORK/dry.out" 2>&1
 check_eq "--dry-run exits 0" 0 "$?"
 check_contains "--dry-run reports would-run" "[would run]" "$WORK/dry.out"
 check_contains "--dry-run reports skip" "command not found" "$WORK/dry.out"
 check_contains "--dry-run shows resolved argv" "argv: bash" "$WORK/dry.out"
+check_contains "--dry-run shows sh argv" "argv: bash -c echo hello-from-sh" "$WORK/dry.out"
 
 echo "== full sequential run =="
 run env AIDEV_TIMEOUT=1 AIDEV_KILL_AFTER=1 timeout 90 \
@@ -270,12 +295,15 @@ check_contains "stubborn step timed out" "✗ Stubborn Step timed out" "$WORK/ru
 check_contains "own-124 reported as failure" "✗ Exit 124 Step failed (exit 124" "$WORK/run.out"
 check_absent  "own-124 not called a timeout" "Exit 124 Step timed out" "$WORK/run.out"
 check_contains "cmd step ran" "hello-from-cmd" "$WORK/run.out"
+check_contains "sh step ran" "hello-from-sh with spaces" "$WORK/run.out"
 check_contains "missing cmd skipped" "command not found: definitely_missing_cmd" "$WORK/run.out"
 check_contains "missing script skipped" "script not found: missing_script.sh" "$WORK/run.out"
 # Sequential proof: gate A runs first, waits for gate B and times out;
 # gate B then finds gate A's marker and succeeds.
 check_contains "gate a serialized (timed out)" "✗ Gate A Step timed out" "$WORK/run.out"
 check_contains "gate b ran after gate a" "✓ Gate B Step completed successfully" "$WORK/run.out"
+check_contains "summary shows elapsed time" "Elapsed:" "$WORK/run.out"
+check_contains "summary formats failures as bullet points" "  - Fail Step" "$WORK/run.out"
 
 # Skipped steps must not inherit a previous step's duration.
 skip_line=$(grep 'Missing Cmd Step' "$WORK/run.out" | grep -E ' +skip +' || true)
@@ -381,6 +409,7 @@ sleep 1
 run bash aidev_update.sh --only "OK Step" > "$WORK/lock2.out" 2>&1
 check_eq "second concurrent run exits 1" 1 "$?"
 check_contains "second run names the lock" "in progress" "$WORK/lock2.out"
+check_contains "second run identifies holding pid" "held by PID $first" "$WORK/lock2.out"
 kill -TERM "$first" 2>/dev/null
 for _ in $(seq 1 100); do kill -0 "$first" 2>/dev/null || break; sleep 0.1; done
 kill -9 "$first" 2>/dev/null
@@ -492,6 +521,34 @@ check_contains "own-124 classified as fail without timeout(1)" \
     "✗ Exit 124 Step failed (exit 124" "$WORK/notimeout.out"
 check_absent "no bogus timeout claim without timeout(1)" \
     "Exit 124 Step timed out" "$WORK/notimeout.out"
+
+echo "== parallel retry preserves logs =="
+rm -f "$WORK/flaky.marker"
+run env AIDEV_TIMEOUT=10 AIDEV_RETRIES=2 timeout 60 \
+    bash aidev_update.sh --jobs 2 --only flaky.sh > "$WORK/retryparlog.out" 2>&1
+check_eq "parallel retry run succeeds" 0 "$?"
+check_contains "parallel retry preserves first attempt output" "flaky.sh first attempt fails" "$WORK/retryparlog.out"
+check_contains "parallel retry contains retry attempt output" "flaky.sh ok on retry" "$WORK/retryparlog.out"
+
+echo "== symlink invocation =="
+LINK_DIR="$WORK/linkdir"
+mkdir -p "$LINK_DIR"
+ln -sf "$WORK/aidev_update.sh" "$LINK_DIR/aidev_symlink"
+run bash "$LINK_DIR/aidev_symlink" --dry-run --only "OK Step" > "$WORK/symlink.out" 2>&1
+check_eq "invoking via symlink succeeds" 0 "$?"
+check_contains "symlink resolves script directory" "argv: bash $WORK/ok.sh" "$WORK/symlink.out"
+
+echo "== fifo pruning =="
+FIFO_TEST="$WORK/logs/.aidev-999999.fifo"
+mkdir -p "$WORK/logs"
+mkfifo "$FIFO_TEST" 2>/dev/null || true
+touch -d '2 days ago' "$FIFO_TEST" 2>/dev/null || touch -t 202001010000 "$FIFO_TEST" 2>/dev/null || true
+run bash "$WORK/aidev_update.sh" --only ok.sh > /dev/null 2>&1
+if [ -e "$FIFO_TEST" ]; then
+    fail "stale fifo pruned"
+else
+    pass "stale fifo pruned"
+fi
 
 echo ""
 echo "====================================="

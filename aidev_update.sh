@@ -16,7 +16,19 @@ set -u
 set -o pipefail
 
 # Directory where this script lives.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks so SCRIPT_DIR points to the actual repository directory even
+# when invoked via a symlink in PATH (e.g. ~/.local/bin/aidev_update).
+SOURCE="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+    while [ -L "$SOURCE" ]; do
+        DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+        SOURCE="$(readlink "$SOURCE")"
+        [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+    done
+fi
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+VERSION="1.3.0"
 
 # The script relies on bash 4.4+ features (case-folding, empty-array expansion
 # under 'set -u'). Fail fast with a clear message instead of a syntax error.
@@ -116,6 +128,7 @@ DISABLED_STEPS=(
     "cmd|task-master --version|Taskmaster Version"
     "script|cliproxyapi_update.sh|CLIProxyAPI Update"
     "script|ollama_update.sh|Ollama Update"
+    "script|pi_update.sh|Pi Coding Agent Update"
 )
 
 # ---------------------------------------------------------------------------
@@ -123,27 +136,37 @@ DISABLED_STEPS=(
 # ---------------------------------------------------------------------------
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
+aidev_update.sh v${VERSION} - update orchestrator for AI dev CLI tools
+
 Usage: aidev_update.sh [options] [name ...]
 
 Options:
-  --only PATTERN    Run only steps whose target/description matches PATTERN.
-                    Repeatable. A bare positional name is treated as --only.
-  --skip PATTERN    Skip steps whose target/description matches PATTERN.
-  --jobs N          Run up to N steps at the same time (default: 1). Each
-                    step's output is buffered and printed when the step
-                    finishes, so parallel runs stay readable.
-  --dry-run         Show which steps would run (and which would be skipped),
-                    then exit without updating anything.
-  --list            List configured steps and their current availability.
-  -h, --help        Show this help.
+  --only PATTERN          Run only steps whose target/description matches PATTERN.
+                          Repeatable. A bare positional name is treated as --only.
+  --skip PATTERN          Skip steps whose target/description matches PATTERN.
+  --jobs N                Run up to N steps at the same time (default: 1). Each
+                          step's output is buffered and printed when the step
+                          finishes, so parallel runs stay readable.
+  -t, --timeout SECONDS   Per-step timeout in seconds (default: 600; 0 disables).
+  -k, --kill-after SECS   Grace period after SIGTERM before SIGKILL (default: 10).
+  -r, --retries N         Attempts per failed step (default: 1, i.e. no retry).
+  --no-log                Disable writing to a run log file.
+  --log-dir DIR           Directory for run logs (default: <script dir>/logs).
+  --dry-run               Show which steps would run (and which would be skipped),
+                          then exit without updating anything.
+  --list                  List configured steps and their current availability.
+  -v, --version           Show version information.
+  -h, --help              Show this help.
+  --                      Stop option processing; remaining arguments are treated
+                          as positional patterns.
 
 Notes:
   - PATTERN matching is a case-insensitive substring test against both the
     step target and its description, so a broad pattern like 'update' or
     'open' can match several steps at once.
-  - 'cmd' steps are split on whitespace only: no quoting, escapes or paths
-    with spaces. Use a small wrapper script for those.
+  - 'cmd' steps are split on whitespace only. 'sh' steps are evaluated with
+    bash -c (supporting quotes, pipes and flags).
 
 Environment:
   AIDEV_TIMEOUT              Per-step timeout in seconds (default: 600).
@@ -163,8 +186,8 @@ Examples:
   aidev_update.sh --skip gastown      # everything except Gastown
   aidev_update.sh --jobs 4            # run up to 4 steps in parallel
   aidev_update.sh --dry-run           # show what would happen
-  AIDEV_TIMEOUT=120 aidev_update.sh   # 2 minute cap per step
-  AIDEV_RETRIES=2 aidev_update.sh      # one extra try on failure
+  aidev_update.sh --timeout 120       # 2 minute cap per step
+  aidev_update.sh --retries 2         # one extra try on failure
 EOF
 }
 
@@ -258,12 +281,24 @@ resolve_step() {
             STEP_SKIP_REASON="command not found: ${STEP_CMD[0]}"
             return 1
         fi
+    elif [ "$kind" = "sh" ]; then
+        if [[ "$target" =~ ^[[:space:]]*$ ]]; then
+            STEP_SKIP_REASON="empty shell command"
+            return 1
+        fi
+        STEP_CMD=(bash -c "$target")
     else
-        if [ ! -f "$SCRIPT_DIR/$target" ]; then
+        local script_path="$target"
+        [[ "$script_path" != /* ]] && script_path="$SCRIPT_DIR/$target"
+        if [ ! -f "$script_path" ]; then
             STEP_SKIP_REASON="script not found: $target"
             return 1
         fi
-        STEP_CMD=(bash "$SCRIPT_DIR/$target")
+        if [ ! -r "$script_path" ]; then
+            STEP_SKIP_REASON="script not readable: $target"
+            return 1
+        fi
+        STEP_CMD=(bash "$script_path")
     fi
     return 0
 }
@@ -281,16 +316,24 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --only)
             shift
-            if [ $# -eq 0 ]; then echo "Missing value for --only" >&2; exit 2; fi
+            if [ $# -eq 0 ] || [ -z "$1" ]; then echo "Option --only requires a non-empty argument" >&2; exit 2; fi
             ONLY_PATTERNS+=("$1")
             ;;
-        --only=*) ONLY_PATTERNS+=("${1#*=}") ;;
+        --only=*)
+            val="${1#*=}"
+            if [ -z "$val" ]; then echo "Option --only requires a non-empty argument" >&2; exit 2; fi
+            ONLY_PATTERNS+=("$val")
+            ;;
         --skip)
             shift
-            if [ $# -eq 0 ]; then echo "Missing value for --skip" >&2; exit 2; fi
+            if [ $# -eq 0 ] || [ -z "$1" ]; then echo "Option --skip requires a non-empty argument" >&2; exit 2; fi
             SKIP_PATTERNS+=("$1")
             ;;
-        --skip=*) SKIP_PATTERNS+=("${1#*=}") ;;
+        --skip=*)
+            val="${1#*=}"
+            if [ -z "$val" ]; then echo "Option --skip requires a non-empty argument" >&2; exit 2; fi
+            SKIP_PATTERNS+=("$val")
+            ;;
         --jobs)
             shift
             if [ $# -eq 0 ]; then echo "Missing value for --jobs" >&2; exit 2; fi
@@ -301,15 +344,92 @@ while [ $# -gt 0 ]; do
             JOBS="$1"
             ;;
         --jobs=*)
-            if ! [[ "${1#*=}" =~ ^[0-9]+$ ]] || [ "${1#*=}" -lt 1 ]; then
+            val="${1#*=}"
+            if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -lt 1 ]; then
                 echo "--jobs must be a positive whole number" >&2
                 exit 2
             fi
-            JOBS="${1#*=}"
+            JOBS="$val"
+            ;;
+        -t|--timeout)
+            shift
+            if [ $# -eq 0 ]; then echo "Missing value for --timeout" >&2; exit 2; fi
+            if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                echo "--timeout must be a non-negative whole number" >&2
+                exit 2
+            fi
+            AIDEV_TIMEOUT="$1"
+            ;;
+        --timeout=*|-t=*)
+            val="${1#*=}"
+            if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+                echo "--timeout must be a non-negative whole number" >&2
+                exit 2
+            fi
+            AIDEV_TIMEOUT="$val"
+            ;;
+        -k|--kill-after)
+            shift
+            if [ $# -eq 0 ]; then echo "Missing value for --kill-after" >&2; exit 2; fi
+            if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                echo "--kill-after must be a non-negative whole number" >&2
+                exit 2
+            fi
+            AIDEV_KILL_AFTER="$1"
+            ;;
+        --kill-after=*|-k=*)
+            val="${1#*=}"
+            if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+                echo "--kill-after must be a non-negative whole number" >&2
+                exit 2
+            fi
+            AIDEV_KILL_AFTER="$val"
+            ;;
+        -r|--retries)
+            shift
+            if [ $# -eq 0 ]; then echo "Missing value for --retries" >&2; exit 2; fi
+            if ! [[ "$1" =~ ^[0-9]+$ ]] || [ "$1" -lt 1 ]; then
+                echo "--retries must be a positive whole number" >&2
+                exit 2
+            fi
+            AIDEV_RETRIES="$1"
+            ;;
+        --retries=*|-r=*)
+            val="${1#*=}"
+            if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -lt 1 ]; then
+                echo "--retries must be a positive whole number" >&2
+                exit 2
+            fi
+            AIDEV_RETRIES="$val"
+            ;;
+        --no-log)
+            AIDEV_NO_LOG=1
+            ;;
+        --log-dir)
+            shift
+            if [ $# -eq 0 ] || [ -z "$1" ]; then echo "Missing value for --log-dir" >&2; exit 2; fi
+            AIDEV_LOG_DIR="$1"
+            ;;
+        --log-dir=*)
+            val="${1#*=}"
+            if [ -z "$val" ]; then echo "Missing value for --log-dir" >&2; exit 2; fi
+            AIDEV_LOG_DIR="$val"
+            ;;
+        -v|--version)
+            echo "aidev_update.sh v${VERSION}"
+            exit 0
             ;;
         --dry-run) DRY_RUN=1 ;;
         --list) LIST_ONLY=1 ;;
         -h|--help) usage; exit 0 ;;
+        --)
+            shift
+            while [ $# -gt 0 ]; do
+                ONLY_PATTERNS+=("$1")
+                shift
+            done
+            break
+            ;;
         -*)
             echo "Unknown option: $1" >&2
             echo "Run '$(basename "$0") --help' for usage." >&2
@@ -320,7 +440,12 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+validate_env
+
 if [ "$LIST_ONLY" -eq 1 ]; then
+    if [ ${#EARLY_WARNINGS[@]} -gt 0 ]; then
+        printf '%s\n' "${EARLY_WARNINGS[@]}" >&2
+    fi
     echo "Enabled steps:"
     for entry in "${STEPS[@]}"; do
         IFS='|' read -r kind target description <<< "$entry"
@@ -375,6 +500,9 @@ fi
 # Dry run: resolve every selected step and report without changing anything.
 # ---------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 1 ]; then
+    if [ ${#EARLY_WARNINGS[@]} -gt 0 ]; then
+        printf '%s\n' "${EARLY_WARNINGS[@]}" >&2
+    fi
     echo "Dry run: ${#selected_entries[@]} step(s) selected"
     for entry in "${selected_entries[@]}"; do
         IFS='|' read -r kind target description <<< "$entry"
@@ -402,9 +530,17 @@ if command_exists flock; then
     # would hold the flock and wedge every future run.
     if : >> "$LOCK_FILE" 2>/dev/null && exec 8>>"$LOCK_FILE"; then
         if flock -n 8; then
-            : # Lock acquired; fd 8 is held until the script exits.
+            printf '%s\n' "$$" > "$LOCK_FILE" 2>/dev/null || true
         else
-            echo "❌ Another aidev_update.sh run is in progress (lock: $LOCK_FILE)." >&2
+            holder=""
+            if [ -r "$LOCK_FILE" ]; then
+                read -r holder < "$LOCK_FILE" 2>/dev/null || true
+            fi
+            if [ -n "$holder" ]; then
+                echo "❌ Another aidev_update.sh run is in progress (held by PID $holder, lock: $LOCK_FILE)." >&2
+            else
+                echo "❌ Another aidev_update.sh run is in progress (lock: $LOCK_FILE)." >&2
+            fi
             exit 1
         fi
     else
@@ -446,17 +582,15 @@ kill_tree() {
 on_signal() {
     local code="$1"
     local pid
+
+    # Broadcast SIGTERM to all active step trees immediately so concurrent
+    # workers stop simultaneously instead of waiting sequentially.
     if [ "${#STEP_CHILDREN[@]}" -gt 0 ]; then
         for pid in "${STEP_CHILDREN[@]}"; do
             kill_tree "$pid" TERM
-            # Bound the wait: a step that ignores SIGTERM must not block Ctrl-C.
-            if ! wait_for_pid "$pid" "$AIDEV_KILL_AFTER"; then
-                kill_tree "$pid" 9
-                wait_for_pid "$pid" 2
-            fi
-            wait "$pid" 2>/dev/null
         done
     fi
+
     # Sweep any other direct children to close the launch race window: a step
     # started microseconds ago may not be recorded in STEP_CHILDREN yet. The
     # log tee (TEE_PID) is deliberately excluded so the EXIT trap can flush.
@@ -466,6 +600,18 @@ on_signal() {
             kill_tree "$pid" TERM
         done
     fi
+
+    # Wait for step children; escalate to SIGKILL for any that do not exit.
+    if [ "${#STEP_CHILDREN[@]}" -gt 0 ]; then
+        for pid in "${STEP_CHILDREN[@]}"; do
+            if ! wait_for_pid "$pid" "$AIDEV_KILL_AFTER"; then
+                kill_tree "$pid" 9
+                wait_for_pid "$pid" 2
+            fi
+            wait "$pid" 2>/dev/null
+        done
+    fi
+
     exit "$code"
 }
 trap 'on_signal 130' INT
@@ -483,21 +629,33 @@ trap 'on_signal 143' TERM
 LOG_FILE=""
 LOG_FIFO=""
 TEE_PID=""
+ORIG_STDOUT_SAVED=0
 
 cleanup_logging() {
     if [ -n "$LOG_FIFO" ]; then
-        # Close our write end so tee sees EOF.
-        exec 1>&- 2>&-
+        # Restore original terminal stdout/stderr so later operations or traps
+        # do not fail with Bad file descriptor, and close the FIFO write end
+        # so tee sees EOF.
+        if [ "$ORIG_STDOUT_SAVED" -eq 1 ]; then
+            exec 1>&3 2>&4 3>&- 4>&-
+            ORIG_STDOUT_SAVED=0
+        else
+            exec 1>&- 2>&-
+        fi
         if [ -n "$TEE_PID" ]; then
             # An orphaned grandchild may still hold the pipe open; never block
             # the run forever waiting for tee.
             if ! wait_for_pid "$TEE_PID" 5; then
                 kill "$TEE_PID" 2>/dev/null
-                wait_for_pid "$TEE_PID" 2
+                if ! wait_for_pid "$TEE_PID" 2; then
+                    kill -9 "$TEE_PID" 2>/dev/null
+                fi
             fi
             wait "$TEE_PID" 2>/dev/null
+            TEE_PID=""
         fi
         [ -p "$LOG_FIFO" ] && rm -f "$LOG_FIFO"
+        LOG_FIFO=""
     fi
 }
 # EXIT trap: remove the parallel-mode temp dir (also on signal-interrupted
@@ -513,11 +671,13 @@ trap on_exit EXIT
 
 prune_logs() {
     local dir="$1" days="$2"
-    [ "$days" -gt 0 ] || return 0
     if ! command_exists find; then
         echo "⚠ 'find' not found; log pruning disabled." >&2
         return 0
     fi
+    # Prune stale named pipes left behind by crashed/killed runs.
+    find "$dir" -maxdepth 1 -type p -name '.aidev-*.fifo' -mtime +1 -delete 2>/dev/null || true
+    [ "$days" -gt 0 ] || return 0
     find "$dir" -maxdepth 1 -type f -name 'aidev-*.log' \
         -mtime +"$days" -delete 2>/dev/null || true
 }
@@ -539,7 +699,8 @@ if [ "${AIDEV_NO_LOG:-0}" != "1" ]; then
             if mkfifo "$LOG_FIFO"; then
                 tee -a "$LOG_FILE" < "$LOG_FIFO" &
                 TEE_PID=$!
-                exec > "$LOG_FIFO" 2>&1
+                exec 3>&1 4>&2 > "$LOG_FIFO" 2>&1
+                ORIG_STDOUT_SAVED=1
             else
                 echo "⚠ Could not create log FIFO; logging disabled." >&2
                 LOG_FILE=""
@@ -557,7 +718,7 @@ if [ ${#EARLY_WARNINGS[@]} -gt 0 ]; then
 fi
 
 RUN_STARTED=$(date '+%Y-%m-%d %H:%M:%S')
-echo "AEDev update run started: $RUN_STARTED"
+echo "AIDev update run started: $RUN_STARTED"
 if [ -n "$LOG_FILE" ]; then
     echo "Log file: $LOG_FILE"
 fi
@@ -608,6 +769,7 @@ execute_step() {
 
     STEP_STATUS=""
     STEP_SECONDS=0
+    STEP_ATTEMPT_SECONDS=0
     STEP_RC=0
 
     if ! resolve_step "$kind" "$target"; then
@@ -627,15 +789,17 @@ execute_step() {
         if command_exists timeout && [ "$AIDEV_TIMEOUT" -gt 0 ]; then
             used_timeout=1
             timeout --kill-after="$AIDEV_KILL_AFTER" "$AIDEV_TIMEOUT" \
-                "${STEP_CMD[@]}" 8>&- &
+                "${STEP_CMD[@]}" < /dev/null 3>&- 4>&- 8>&- &
         else
-            "${STEP_CMD[@]}" 8>&- &
+            "${STEP_CMD[@]}" < /dev/null 3>&- 4>&- 8>&- &
         fi
         STEP_CHILDREN=($!)
         wait "${STEP_CHILDREN[0]}" || rc=$?
         STEP_CHILDREN=()
 
-        classify_rc "$rc" "$((SECONDS - started))" "$used_timeout"
+        local attempt_seconds=$((SECONDS - started))
+        classify_rc "$rc" "$attempt_seconds" "$used_timeout"
+        STEP_ATTEMPT_SECONDS=$attempt_seconds
 
         if [ "$STEP_STATUS" != "fail" ] || [ "$attempt" -ge "$AIDEV_RETRIES" ]; then
             STEP_RC=$rc
@@ -681,19 +845,27 @@ run_steps_parallel() {
         p_out[si]="$tmpdir/step-$si.log"
         p_start[si]=$SECONDS
         rm -f "${p_out[si]}.rc"
+
+        if [ "${p_attempt[si]}" -gt 1 ]; then
+            printf '\n--- Retrying %s (attempt %d of %d) ---\n\n' \
+                "$description" "${p_attempt[si]}" "$AIDEV_RETRIES" >> "${p_out[si]}"
+        else
+            : > "${p_out[si]}"
+        fi
+
         if [ "$AIDEV_TIMEOUT" -gt 0 ] && command_exists timeout; then
             p_used[si]=1
             (
                 timeout --kill-after="$AIDEV_KILL_AFTER" "$AIDEV_TIMEOUT" \
-                    "${STEP_CMD[@]}" > "${p_out[si]}" 2>&1
+                    "${STEP_CMD[@]}" < /dev/null >> "${p_out[si]}" 2>&1
                 echo $? > "${p_out[si]}.rc"
-            ) 8>&- &
+            ) 3>&- 4>&- 8>&- &
         else
             p_used[si]=0
             (
-                "${STEP_CMD[@]}" > "${p_out[si]}" 2>&1
+                "${STEP_CMD[@]}" < /dev/null >> "${p_out[si]}" 2>&1
                 echo $? > "${p_out[si]}.rc"
-            ) 8>&- &
+            ) 3>&- 4>&- 8>&- &
         fi
         p_pid[si]=$!
         STEP_CHILDREN+=("$!")
@@ -715,8 +887,8 @@ run_steps_parallel() {
 
         IFS='|' read -r kind target description <<< "${selected_entries[idx]}"
         if [ "$STEP_STATUS" = "fail" ] && [ "${p_attempt[idx]}" -lt "$AIDEV_RETRIES" ]; then
+            p_attempt[idx]=$((p_attempt[idx] + 1))
             if spawn_step "$idx"; then
-                p_attempt[idx]=$((p_attempt[idx] + 1))
                 echo "↻ $description failed (exit $rc); retrying (attempt ${p_attempt[idx]} of $AIDEV_RETRIES)..."
                 return 0
             fi
@@ -775,7 +947,7 @@ run_steps_parallel() {
     for ((i = 0; i < n; i++)); do
         IFS='|' read -r kind target description <<< "${selected_entries[i]}"
         if ! resolve_step "$kind" "$target"; then
-            echo "⚠ ${STEP_SKIP_REASON}"
+            echo "⚠ $description skipped: ${STEP_SKIP_REASON}"
             RESULT_STATUS[i]="skip"
             RESULT_SECONDS[i]=0
             RESULT_RC[i]=""
@@ -788,7 +960,7 @@ run_steps_parallel() {
         p_attempt[i]=1
         p_total[i]=$SECONDS
         spawn_step "$i" || {
-            echo "⚠ ${STEP_SKIP_REASON}"
+            echo "⚠ $description skipped: ${STEP_SKIP_REASON}"
             RESULT_STATUS[i]="skip"
             RESULT_SECONDS[i]=0
             RESULT_RC[i]=""
@@ -848,7 +1020,7 @@ if [ "$JOBS" -eq 1 ]; then
         case "$STEP_STATUS" in
             ok)      echo "✓ $description completed successfully (${STEP_SECONDS}s)" ;;
             skip)    echo "⚠ $description skipped"; skipped_count=$((skipped_count + 1)) ;;
-            timeout) echo "✗ $description timed out after ${STEP_SECONDS}s (limit ${AIDEV_TIMEOUT}s)"; failures+=("$description") ;;
+            timeout) echo "✗ $description timed out after ${STEP_ATTEMPT_SECONDS}s (limit ${AIDEV_TIMEOUT}s)"; failures+=("$description") ;;
             fail)    echo "✗ $description failed (exit ${STEP_RC}, ${STEP_SECONDS}s)"; failures+=("$description") ;;
         esac
     done
@@ -857,27 +1029,41 @@ fi
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
+TOTAL_SECONDS=$SECONDS
 echo ""
 echo "====================================="
 echo "Summary"
 echo "====================================="
-printf '%-40s %-8s %-7s %-5s\n' "Step" "Status" "Time" "Exit"
-printf '%-40s %-8s %-7s %-5s\n' "----" "------" "----" "----"
+
+col_w=40
+for name in "${RESULT_NAMES[@]}"; do
+    [ "${#name}" -gt "$col_w" ] && col_w="${#name}"
+done
+
+header_fmt="%-${col_w}s %-8s %-7s %-5s\n"
+printf -v dashes '%*s' "$col_w" ''
+dashes="${dashes// /-}"
+printf "$header_fmt" "Step" "Status" "Time" "Exit"
+printf "$header_fmt" "$dashes" "------" "----" "----"
 for i in "${!RESULT_NAMES[@]}"; do
-    printf '%-40s %-8s %-7s %-5s\n' "${RESULT_NAMES[$i]}" "${RESULT_STATUS[$i]}" "${RESULT_SECONDS[$i]}s" "${RESULT_RC[$i]:--}"
+    printf "$header_fmt" "${RESULT_NAMES[$i]}" "${RESULT_STATUS[$i]}" "${RESULT_SECONDS[$i]}s" "${RESULT_RC[$i]:--}"
 done
 
 echo ""
-echo "Started:  $RUN_STARTED"
-echo "Finished: $(date '+%Y-%m-%d %H:%M:%S')"
+printf "Started:  %s\n" "$RUN_STARTED"
+printf "Finished: %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+printf "Elapsed:  %dm %ds (%ds)\n" $((TOTAL_SECONDS / 60)) $((TOTAL_SECONDS % 60)) "$TOTAL_SECONDS"
 if [ -n "$LOG_FILE" ]; then
-    echo "Log:      $LOG_FILE"
+    printf "Log:      %s\n" "$LOG_FILE"
 fi
 
 echo ""
 if [ ${#failures[@]} -gt 0 ]; then
     echo "====================================="
-    echo "❌ ${#failures[@]} update(s) failed: ${failures[*]}"
+    echo "❌ ${#failures[@]} update(s) failed:"
+    for f in "${failures[@]}"; do
+        printf "  - %s\n" "$f"
+    done
     echo "====================================="
     exit 1
 fi
