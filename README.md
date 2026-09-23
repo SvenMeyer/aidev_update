@@ -101,6 +101,7 @@ Enabled steps, in run order:
 
 | Step                    | Kind        | Notes                              |
 | ----------------------- | ----------- | ---------------------------------- |
+| omp Update              | command     | `omp update`                       |
 | OpenSpec Update         | script      | `openspec_update.sh`               |
 | mini-swe-agent Update   | script      | pipx-based                         |
 | Claude Code CLI Update  | command     | `claude update`                    |

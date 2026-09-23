@@ -104,6 +104,7 @@ validate_env() {
 # To enable/disable a step, move its line between STEPS and DISABLED_STEPS.
 # ---------------------------------------------------------------------------
 STEPS=(
+    "cmd|omp update|omp Update"
     "script|openspec_update.sh|OpenSpec Update"
     "script|mini_swe_agent_update.sh|mini-swe-agent Update"
     "cmd|claude update|Claude Code CLI Update"
