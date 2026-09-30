@@ -123,6 +123,13 @@ Codebuff, Taskmaster, CLIProxyAPI, Ollama, Pi Coding Agent). Run
 `./aidev_update.sh --list` to see them, and see "Adding or changing steps" below
 to re-enable one.
 
+`codex_update.sh [alpha|latest|beta]` defaults to `alpha`. After checking or
+installing the CLI, it uses `codex app-server daemon update --from-cli --yes`
+to pin the managed daemon to that exact CLI package, including pre-releases.
+It skips the daemon update when both the managed package and running server
+already match. Updating a stale daemon may interrupt running work. Older CLIs
+without this command report a skipped daemon update.
+
 ## Adding or changing steps
 
 ### Without editing the script
@@ -194,6 +201,10 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
   contention and missing required tools
 
 ## Testing
+
+`bash tests/codex_update_test.sh` checks CLI and daemon updates with isolated
+command stubs, including a stale daemon when the CLI is already current,
+avoiding unnecessary restarts, and reporting installation or daemon failures.
 
 `tests/orchestrator_test.sh` builds a throwaway copy of the orchestrator with
 stub steps and checks selection, dry-run, timeouts, exit-code classification,
