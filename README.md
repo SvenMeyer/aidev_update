@@ -19,6 +19,7 @@ summary is printed and the exit code reflects whether anything failed.
 - **npm** (used by several npm-based tool updaters)
 - **curl** (used by several download-based updaters)
 - **pipx** and **python3** (for the Python-based tools: mini-swe-agent, headroom)
+- **uv** (for Repowise and Graphify; on Manjaro: `sudo pacman -S uv`)
 - **coreutils** (`timeout`, `mkfifo`, `tee`) for per-step timeouts and logging
 - **flock** (optional) to prevent two runs from racing the package managers
 
@@ -116,6 +117,15 @@ Enabled steps, in run order:
 | Gastown Update          | script      | `gastown_update.sh`                |
 | Gastown GUI Update      | script      | `gastown_gui_update.sh`            |
 | Repowise Update         | script      | `repowise_update.sh`               |
+| Graphify Update         | script      | `graphify_update.sh`               |
+
+`bash graphify_update.sh` installs or updates the official
+[`graphifyy`](https://github.com/Graphify-Labs/graphify) package using `uv`.
+It installs the CLI in an isolated environment and refreshes the package index
+to find the latest stable release. For a first installation, run
+`graphify install` afterwards to register its skill with your AI assistant;
+if the CLI is missing from your PATH, run `uv tool update-shell` and reopen
+your terminal. Existing Graphify skills refresh automatically on CLI use.
 
 Additional updater scripts exist in the repository but are disabled by default
 (Claude updater script, Copilot, CCR, Gemini, Qwen, Amp, LLxprt, JustCode,

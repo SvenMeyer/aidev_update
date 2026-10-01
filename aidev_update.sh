@@ -119,6 +119,7 @@ STEPS=(
     "script|gastown_update.sh|Gastown Update"
     "script|gastown_gui_update.sh|Gastown GUI Update"
     "script|repowise_update.sh|Repowise Update"
+    "script|graphify_update.sh|Graphify Update"
 )
 
 # Kept for reference; not executed. Move a line into STEPS to re-enable it.
