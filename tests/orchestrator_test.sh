@@ -58,7 +58,7 @@ check_absent() {
 # ---------------------------------------------------------------------------
 # Build the sandbox
 # ---------------------------------------------------------------------------
-cp "$REPO_DIR/aidev_update.sh" "$WORK/aidev_update.sh"
+cp "$REPO_DIR/aidev_update_v1.sh" "$WORK/aidev_update.sh"
 chmod +x "$WORK/aidev_update.sh"
 
 cat > "$WORK/ok.sh" <<'EOF'
@@ -574,10 +574,10 @@ echo "== lint (shellcheck) =="
 # so the suite still runs on machines without it.
 SHELLCHECK="${SHELLCHECK:-$(command -v shellcheck 2>/dev/null || true)}"
 if [ -n "$SHELLCHECK" ] && [ -x "$SHELLCHECK" ]; then
-    if "$SHELLCHECK" -s bash "$REPO_DIR/aidev_update.sh" > "$WORK/lint.out" 2>&1; then
-        pass "aidev_update.sh is shellcheck clean"
+    if "$SHELLCHECK" -s bash "$REPO_DIR/aidev_update_v1.sh" > "$WORK/lint.out" 2>&1; then
+        pass "aidev_update_v1.sh is shellcheck clean"
     else
-        fail "aidev_update.sh is shellcheck clean"
+        fail "aidev_update_v1.sh is shellcheck clean"
         sed -n '1,40p' "$WORK/lint.out" | sed 's/^/      /'
     fi
     if "$SHELLCHECK" -s bash "$REPO_DIR/tests/orchestrator_test.sh" > "$WORK/lint2.out" 2>&1; then
@@ -688,13 +688,13 @@ else
 fi
 
 echo "== script hygiene =="
-if grep -q '^STEP_ATTEMPT_SECONDS=0' "$REPO_DIR/aidev_update.sh"; then
+if grep -q '^STEP_ATTEMPT_SECONDS=0' "$REPO_DIR/aidev_update_v1.sh"; then
     pass "STEP_ATTEMPT_SECONDS declared with the step globals"
 else
     fail "STEP_ATTEMPT_SECONDS declared with the step globals"
 fi
 check_absent "no stale zombie claim in the wait_for_pid comment" \
-    "zombies still answer" "$REPO_DIR/aidev_update.sh"
+    "zombies still answer" "$REPO_DIR/aidev_update_v1.sh"
 
 echo "== parallel wrapper killed does not hang =="
 start_bg env AIDEV_NO_LOG=1 AIDEV_TIMEOUT=60 AIDEV_KILL_AFTER=2 \

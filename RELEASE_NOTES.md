@@ -1,5 +1,19 @@
 # Release Notes
 
+## 2026-10-02 (v2.0.0)
+
+### Lean rewrite
+
+`aidev_update.sh` is now a small script with one job: run the selected
+`*_update.sh` tools one after the other. An interactive run opens a checkbox
+menu (arrows to move, space to toggle, enter to run); the choice is saved in
+`selection.md` (git-ignored) and reused next time; a non-interactive run uses
+the saved selection silently. New `omp_update.sh` and `droid_update.sh`
+wrappers; `claude_update.sh` now wraps the official `claude update` command.
+The previous orchestrator is kept unchanged as `aidev_update_v1.sh` (selector
+`aidev_select.sh`, state `steps.conf`); the design rationale lives in
+`specs_v2.md`.
+
 ## 2026-10-02 (v1.5.0)
 
 ### Startup selection menu
