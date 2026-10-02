@@ -28,6 +28,12 @@ code is `1` when any tool failed, `0` otherwise.
 
 - **Add**: drop a `mytool_update.sh` next to `aidev_update.sh`. It appears in
   the menu on the next run, on by default.
+- **Convention**: when a tool ships its own update command (`foo update` /
+  `foo upgrade`), its script is a thin wrapper that runs it — and installs
+  the tool first when it is missing, so the scripts also work on a fresh
+  machine. See `claude_update.sh` or `pi_update.sh` for the pattern. Tools
+  without a built-in command keep their full install/update logic
+  (e.g. `codex_update.sh`, which tracks the alpha channel).
 - **Remove**: delete its script. Its line disappears from `selection.md` on
   the next menu save.
 - `selection.md` is plain markdown checkboxes and safe to edit by hand:

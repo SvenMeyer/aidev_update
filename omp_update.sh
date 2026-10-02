@@ -1,3 +1,7 @@
 #!/usr/bin/env bash
-# Update the oh-my-posh prompt engine via its own CLI.
-exec omp update
+# Update oh-my-posh via its own CLI; install it first on a fresh machine.
+if command -v omp >/dev/null 2>&1; then
+    exec omp update
+fi
+echo "omp not found — installing the latest version…"
+exec bash -c "$(curl -fsSL https://ohmyposh.dev/install.sh)"
