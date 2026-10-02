@@ -1,5 +1,15 @@
 # Release Notes
 
+## 2026-10-02 (v1.5.0)
+
+### Startup selection menu
+
+An interactive run of `aidev_update.sh` opens `aidev_select.sh` before updating.
+Every known tool can be switched on or off, including `select ALL` and
+`select NONE`. The choice is saved to `steps.conf` (or `AIDEV_STEPS_FILE`) and
+the next run starts from that same choice. `--no-menu`, `--only`, `--skip`,
+`--list` and a non-interactive run leave the saved file alone.
+
 ## 2026-09-16 (v1.4.0)
 
 ### Review follow-ups: parallel hang, exit codes, external step table (`aidev_update.sh`)

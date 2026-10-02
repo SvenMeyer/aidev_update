@@ -28,7 +28,7 @@ if command -v readlink >/dev/null 2>&1; then
 fi
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 
 # Captured before option parsing consumes "$@", so the run log can record how
 # the run was actually invoked.
@@ -101,7 +101,9 @@ validate_env() {
 # Note: 'cmd' targets are split on whitespace only. Quoting, escapes and paths
 # containing spaces are NOT supported; use a small wrapper script for those.
 #
-# To enable/disable a step, move its line between STEPS and DISABLED_STEPS.
+# To enable or disable a step for one machine, run the script and use the
+# menu. The choice is stored in steps.conf. Moving a line between STEPS and
+# DISABLED_STEPS changes the default used when that file does not exist yet.
 # ---------------------------------------------------------------------------
 STEPS=(
     "cmd|omp update|omp Update"
@@ -151,17 +153,39 @@ DISABLED_STEPS=(
 STEPS_SOURCE="built-in step table"
 
 # Replace STEPS from the given file. Returns 1 (leaving STEPS untouched) when
-# the file yields no usable entries.
+# the file yields no usable entries and is not an intentional empty selection.
+#
+# A file written by aidev_select.sh starts with '# aidev-selection-v1'. Enabled
+# tools are normal 'kind|target|description' lines. Turned-off tools are
+# '# disabled: kind|target|description' lines, so they stay visible to --list
+# and to the next menu. An intentional empty selection (the marker, and every
+# tool disabled) does not fall back to the built-in table.
 load_steps_file() {
-    local file="$1" line kind target description
-    local lineno=0
-    local -a loaded=()
+    local file="$1" line kind target description rest
+    local lineno=0 selection_marker=0
+    local -a loaded=() disabled=()
 
     while IFS= read -r line || [ -n "$line" ]; do
         lineno=$((lineno + 1))
         line="${line%$'\r'}"                       # tolerate CRLF
         line="${line#"${line%%[![:space:]]*}"}"     # strip leading blanks
         [ -z "$line" ] && continue
+
+        if [[ "$line" =~ ^#[[:space:]]*aidev-selection-v1[[:space:]]*$ ]]; then
+            selection_marker=1
+            continue
+        fi
+        if [[ "$line" =~ ^#[[:space:]]*disabled:[[:space:]]*(.*)$ ]]; then
+            rest="${BASH_REMATCH[1]}"
+            rest="${rest#"${rest%%[![:space:]]*}"}"
+            IFS='|' read -r kind target description <<< "$rest"
+            if [ -z "$kind" ] || [ -z "$target" ] || [ -z "${description:-}" ]; then
+                EARLY_WARNINGS+=("⚠ Ignoring malformed disabled step at $file:$lineno.")
+                continue
+            fi
+            disabled+=("$kind|$target|$description")
+            continue
+        fi
         [ "${line:0:1}" = "#" ] && continue
 
         IFS='|' read -r kind target description <<< "$line"
@@ -172,17 +196,73 @@ load_steps_file() {
         loaded+=("$kind|$target|$description")
     done < "$file"
 
-    if [ "${#loaded[@]}" -eq 0 ]; then
+    if [ "${#loaded[@]}" -eq 0 ] && [ "$selection_marker" -eq 0 ]; then
         EARLY_WARNINGS+=("⚠ No usable steps in $file; using the built-in step table.")
         return 1
     fi
 
-    STEPS=("${loaded[@]}")
+    STEPS=()
+    if [ "${#loaded[@]}" -gt 0 ]; then
+        STEPS=("${loaded[@]}")
+    fi
     # The file is the whole truth about which steps exist; carrying the
     # built-in "disabled" list alongside it would just be confusing.
     DISABLED_STEPS=()
+    if [ "${#disabled[@]}" -gt 0 ]; then
+        DISABLED_STEPS=("${disabled[@]}")
+    fi
     STEPS_SOURCE="$file"
     return 0
+}
+
+# Write the built-in catalogue for the selection menu. Each line is
+# "+|kind|target|description" (on by default) or "-|..." (off by default).
+write_step_catalog() {
+    local dest="$1" entry
+    {
+        for entry in "${STEPS[@]}"; do
+            printf '%s\n' "+|$entry"
+        done
+        if [ "${#DISABLED_STEPS[@]}" -gt 0 ]; then
+            for entry in "${DISABLED_STEPS[@]}"; do
+                printf '%s\n' "-|$entry"
+            done
+        fi
+    } > "$dest"
+}
+
+# The menu rewrites the saved selection, so one-off filters and listing leave
+# it alone. A run with no terminal (cron, a pipe, the test suite) does too.
+menu_wanted() {
+    [ "$LIST_ONLY" -eq 1 ] && return 1
+    [ "$NO_MENU" -eq 1 ] && return 1
+    [ "${AIDEV_NO_MENU:-0}" = "1" ] && return 1
+    [ ${#ONLY_PATTERNS[@]} -gt 0 ] && return 1
+    [ ${#SKIP_PATTERNS[@]} -gt 0 ] && return 1
+    [ -t 0 ] && [ -t 1 ] || return 1
+    return 0
+}
+
+run_selection_menu() {
+    local selection_file catalog rc
+    if [ -n "${AIDEV_STEPS_FILE:-}" ]; then
+        selection_file="$AIDEV_STEPS_FILE"
+    else
+        selection_file="$SCRIPT_DIR/steps.conf"
+    fi
+    if [ ! -f "$SCRIPT_DIR/aidev_select.sh" ]; then
+        echo "❌ Selection menu not found: $SCRIPT_DIR/aidev_select.sh" >&2
+        return 1
+    fi
+    catalog=$(mktemp) || {
+        echo "❌ Could not create a temporary catalog for the selection menu." >&2
+        return 1
+    }
+    write_step_catalog "$catalog"
+    bash "$SCRIPT_DIR/aidev_select.sh" --catalog "$catalog" --selection "$selection_file"
+    rc=$?
+    rm -f "$catalog"
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -212,6 +292,8 @@ Options:
   --dry-run               Show which steps would run (and which would be skipped),
                           then exit without updating anything.
   --list                  List configured steps and their current availability.
+  --no-menu               Skip the selection menu and use the saved choice
+                          (or the built-in list, when nothing is saved yet).
   -v, --version           Show version information.
   -h, --help              Show this help.
   --                      Stop option processing; remaining arguments are treated
@@ -225,9 +307,16 @@ Notes:
     bash -c (supporting quotes, pipes and flags).
   - npm and curl are only advisory: a missing tool is reported, but it aborts
     the run only when named by --require / AIDEV_REQUIRE.
+  - An interactive run opens a menu first. 'select ALL' and 'select NONE'
+    switch every tool. The choice is saved to steps.conf (or AIDEV_STEPS_FILE)
+    and the next run starts from that same choice. --only, --skip, --list,
+    --no-menu and a run with no terminal leave the saved choice as it is and
+    do not prompt.
   - A 'steps.conf' next to the script (or AIDEV_STEPS_FILE) replaces the
     built-in step table. Format is one 'kind|target|description' per line;
-    blank lines and '#' comments are ignored.
+    blank lines and '#' comments are ignored. A line '# disabled: kind|target|description'
+    keeps a tool in the menu without running it. A file that starts with
+    '# aidev-selection-v1' and enables nothing updates nothing.
 
 Exit codes:
   0  every attempted step succeeded (skipped steps are allowed)
@@ -247,13 +336,16 @@ Environment:
                              before anything runs (default: none).
   AIDEV_STEPS_FILE           Step table to use instead of the built-in one
                              (default: <script dir>/steps.conf when present).
+                             The selection menu reads and writes this file.
+  AIDEV_NO_MENU              Set to 1 to skip the selection menu.
   AIDEV_LOG_DIR              Directory for run logs (default: <script dir>/logs).
   AIDEV_LOG_RETENTION_DAYS   Delete run logs older than this many days
                              (default: 30; 0 disables pruning).
   AIDEV_NO_LOG               Set to 1 to disable logging.
 
 Examples:
-  aidev_update.sh                     # run everything
+  aidev_update.sh                     # menu, then update the saved choice
+  aidev_update.sh --no-menu           # saved choice, or every built-in step
   aidev_update.sh --only grok         # just the Grok updater
   aidev_update.sh --skip gastown      # everything except Gastown
   aidev_update.sh --jobs 4            # run up to 4 steps in parallel
@@ -392,6 +484,7 @@ SKIP_PATTERNS=()
 JOBS=1
 LIST_ONLY=0
 DRY_RUN=0
+NO_MENU=0
 
 # Option-parsing helpers. Every value-taking option needs the same three
 # checks; keeping them in one place is what stops the '--opt value' and
@@ -455,6 +548,7 @@ while [ $# -gt 0 ]; do
         --no-log)        AIDEV_NO_LOG=1 ;;
         --dry-run)       DRY_RUN=1 ;;
         --list)          LIST_ONLY=1 ;;
+        --no-menu)       NO_MENU=1 ;;
         -v|--version)    echo "aidev_update.sh v${VERSION}"; exit 0 ;;
         -h|--help)       usage; exit 0 ;;
         --)
@@ -477,6 +571,10 @@ done
 # AIDEV_LOG_RETENTION_DAYS later); warnings are replayed once logging is up.
 validate_env
 
+if menu_wanted; then
+    run_selection_menu || exit $?
+fi
+
 if [ -n "${AIDEV_STEPS_FILE:-}" ]; then
     if [ ! -f "$AIDEV_STEPS_FILE" ]; then
         echo "❌ AIDEV_STEPS_FILE not found: $AIDEV_STEPS_FILE" >&2
@@ -494,6 +592,9 @@ if [ "$LIST_ONLY" -eq 1 ]; then
     echo "Steps from: $STEPS_SOURCE"
     echo ""
     echo "Enabled steps:"
+    if [ ${#STEPS[@]} -eq 0 ]; then
+        echo "  (none)"
+    fi
     for entry in "${STEPS[@]}"; do
         IFS='|' read -r kind target description <<< "$entry"
         if resolve_step "$kind" "$target"; then
@@ -505,7 +606,7 @@ if [ "$LIST_ONLY" -eq 1 ]; then
     done
     if [ ${#DISABLED_STEPS[@]} -gt 0 ]; then
         echo ""
-        echo "Disabled steps (kept for reference; move a line into STEPS to enable):"
+        echo "Disabled steps:"
         for entry in "${DISABLED_STEPS[@]}"; do
             IFS='|' read -r _ target description <<< "$entry"
             printf '  %-28s %s\n' "$target" "$description"
@@ -535,6 +636,14 @@ for entry in "${STEPS[@]}"; do
 done
 
 if [ ${#selected_entries[@]} -eq 0 ]; then
+    if [ ${#EARLY_WARNINGS[@]} -gt 0 ]; then
+        printf '%s\n' "${EARLY_WARNINGS[@]}" >&2
+    fi
+    if [ ${#ONLY_PATTERNS[@]} -eq 0 ] && [ ${#SKIP_PATTERNS[@]} -eq 0 ]; then
+        echo "No tools are selected, so nothing was updated."
+        echo "Run again and turn at least one tool on, or choose select ALL."
+        exit 0
+    fi
     echo "⚠ No steps matched the given --only/--skip filters." >&2
     echo "Available steps:" >&2
     for entry in "${STEPS[@]}"; do

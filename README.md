@@ -36,7 +36,8 @@ log file instead of hanging.
 ## Usage
 
 ```bash
-./aidev_update.sh                     # run every enabled step
+./aidev_update.sh                     # choose tools, then update that selection
+./aidev_update.sh --no-menu           # update the saved selection without asking
 ./aidev_update.sh --only grok         # run only matching step(s)
 ./aidev_update.sh grok                # positional names work like --only
 ./aidev_update.sh --skip gastown      # run everything except matching step(s)
@@ -48,6 +49,18 @@ log file instead of hanging.
 ./aidev_update.sh --version           # print version information
 ./aidev_update.sh --help              # full usage
 ```
+
+An interactive run opens a menu before anything is updated. Every known tool is
+listed, on or off. `select ALL` and `select NONE` switch the whole list. Press
+enter to save and start the update, or `q` to quit without changing the saved
+choice and without updating. The choice is written to `steps.conf` (or
+`AIDEV_STEPS_FILE` when that is set) and the next run opens with the same tools
+switched on.
+
+`--only`, `--skip`, `--list`, `--no-menu` and a run whose stdin or stdout is
+not a terminal do not open the menu. They use the saved file when it exists,
+and the built-in list when it does not. `AIDEV_NO_MENU=1` is the same switch as
+`--no-menu`.
 
 Matching is a case-insensitive substring test against a step's target and
 description, so `--only gastown` selects both the Gastown and Gastown GUI steps,
@@ -74,6 +87,7 @@ Every setting can be specified via a command-line flag or an environment variabl
 | (env only)             | `AIDEV_STEPS_FILE`        | `<script dir>/steps.conf` | Step table to use instead of the built-in one |
 | `--log-dir DIR`        | `AIDEV_LOG_DIR`           | `<script dir>/logs` | Directory for run logs                          |
 | (env only)             | `AIDEV_LOG_RETENTION_DAYS`| `30`                | Delete run logs older than this (`0` = keep all)|
+| `--no-menu`            | `AIDEV_NO_MENU`           | unset               | Set to `1` to skip the selection menu           |
 | `--no-log`             | `AIDEV_NO_LOG`            | unset               | Set to `1` to disable logging                   |
 
 Each run is logged to `logs/aidev-<timestamp>-<pid>.log` (git-ignored). A FIFO is
@@ -144,8 +158,9 @@ without this command report a skipped daemon update.
 
 ### Without editing the script
 
-Put a `steps.conf` next to `aidev_update.sh` (or point `AIDEV_STEPS_FILE` at a
-file elsewhere) and it replaces the built-in table entirely — local tool choices
+The startup menu writes `steps.conf` for you (the file is git-ignored). You can
+also put one next to `aidev_update.sh` yourself, or point `AIDEV_STEPS_FILE` at
+a file elsewhere. Either way it replaces the built-in table — local tool choices
 then stay out of the script's own diff:
 
 ```
@@ -154,9 +169,13 @@ script|grok_update.sh|Grok CLI Update
 cmd|claude update|Claude Code CLI Update
 ```
 
-Malformed lines are reported and skipped; if the file yields no usable entries,
-the built-in table is used instead. `--list` shows which table is in effect.
-Setting `AIDEV_STEPS_FILE` to a path that does not exist is an error (exit `2`).
+Malformed lines are reported and skipped. A file with no usable entries and no
+`# aidev-selection-v1` marker falls back to the built-in table. A file with
+that marker and nothing enabled updates nothing. Lines of the form
+`# disabled: kind|target|description` stay in the menu and in `--list`, and do
+not run. `--list` shows which table is in effect. Setting `AIDEV_STEPS_FILE`
+to a path that does not exist is an error (exit `2`), unless an interactive
+menu creates it on the way in.
 
 ### By editing the script
 
@@ -185,6 +204,7 @@ To disable a step, move its line into `DISABLED_STEPS`; to enable, move it back.
 
 - **Declarative step list** — add, remove, reorder, or toggle a step in one line
 - **Preflight checks** — missing commands or scripts are reported before the run
+- **Startup menu** — pick which tools update; the choice is reused next time
 - **Subset selection** — `--only`, `--skip`, and positional name filters
 - **Dry run** — `--dry-run` resolves every selected step, reports it and shows
   the exact argv that would run
@@ -228,7 +248,8 @@ no-`tee`/no-`timeout` fallbacks:
 ./tests/orchestrator_test.sh
 ```
 
-The suite also lints both scripts with `shellcheck` when it is available; set
+The suite also lints the orchestrator, the selection menu and the test script
+with `shellcheck` when it is available; set
 `SHELLCHECK=/path/to/shellcheck` to point at a non-PATH install. Without it the
 lint stage reports a skip rather than failing:
 
@@ -238,7 +259,7 @@ SHELLCHECK="$(command -v shellcheck)" ./tests/orchestrator_test.sh
 
 ## Exit Codes
 
-- `0` — every attempted step succeeded (skipped steps are allowed)
+- `0` — every attempted step succeeded (skipped steps are allowed), or no tools were selected
 - `1` — one or more steps failed or timed out
 - `2` — invalid command-line usage, no step matched the `--only`/`--skip`
   filters, or `AIDEV_STEPS_FILE` points at a missing file

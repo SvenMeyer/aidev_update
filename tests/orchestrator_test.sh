@@ -247,16 +247,18 @@ start_bg() {
 echo "== basic options =="
 run bash aidev_update.sh --version > "$WORK/ver.out" 2>&1
 check_eq "--version exits 0" 0 "$?"
-check_contains "--version outputs v1.4.0" "v1.4.0" "$WORK/ver.out"
+check_contains "--version outputs v1.5.0" "v1.5.0" "$WORK/ver.out"
 
 run bash aidev_update.sh -v > "$WORK/ver_short.out" 2>&1
 check_eq "-v exits 0" 0 "$?"
-check_contains "-v outputs v1.4.0" "v1.4.0" "$WORK/ver_short.out"
+check_contains "-v outputs v1.5.0" "v1.5.0" "$WORK/ver_short.out"
 
 run bash aidev_update.sh --help > "$WORK/help.out" 2>&1
 check_eq "--help exits 0" 0 "$?"
 check_contains "--help documents --dry-run" "--dry-run" "$WORK/help.out"
 check_contains "--help documents --jobs" "--jobs" "$WORK/help.out"
+check_contains "--help documents --no-menu" "--no-menu" "$WORK/help.out"
+check_contains "--help documents select ALL" "select ALL" "$WORK/help.out"
 
 run bash aidev_update.sh --list > "$WORK/list.out" 2>&1
 check_eq "--list exits 0" 0 "$?"
@@ -294,6 +296,11 @@ check_contains "--dry-run reports would-run" "[would run]" "$WORK/dry.out"
 check_contains "--dry-run reports skip" "command not found" "$WORK/dry.out"
 check_contains "--dry-run shows resolved argv" "argv: bash" "$WORK/dry.out"
 check_contains "--dry-run shows sh argv" "argv: bash -c echo hello-from-sh" "$WORK/dry.out"
+if [ -f "$WORK/steps.conf" ]; then
+    fail "non-interactive run does not write steps.conf"
+else
+    pass "non-interactive run does not write steps.conf"
+fi
 
 echo "== full sequential run =="
 run env AIDEV_TIMEOUT=1 AIDEV_KILL_AFTER=1 timeout 90 \
@@ -579,6 +586,12 @@ if [ -n "$SHELLCHECK" ] && [ -x "$SHELLCHECK" ]; then
         fail "orchestrator_test.sh is shellcheck clean"
         sed -n '1,40p' "$WORK/lint2.out" | sed 's/^/      /'
     fi
+    if "$SHELLCHECK" -s bash "$REPO_DIR/aidev_select.sh" > "$WORK/lint3.out" 2>&1; then
+        pass "aidev_select.sh is shellcheck clean"
+    else
+        fail "aidev_select.sh is shellcheck clean"
+        sed -n '1,40p' "$WORK/lint3.out" | sed 's/^/      /'
+    fi
 else
     skip "shellcheck lint (binary not found; set \$SHELLCHECK to enable)"
 fi
@@ -664,7 +677,7 @@ echo "== log header provenance =="
 run timeout 60 bash aidev_update.sh --only "OK Step" > "$WORK/prov.out" 2>&1
 check_eq "provenance run exits 0" 0 "$?"
 check_contains "header reports version" "Version:" "$WORK/prov.out"
-check_contains "header reports the running version" "1.4.0" "$WORK/prov.out"
+check_contains "header reports the running version" "1.5.0" "$WORK/prov.out"
 check_contains "header reports host" "Host:" "$WORK/prov.out"
 check_contains "header reports the command line" "--only OK Step" "$WORK/prov.out"
 prov_log=$(find "$WORK/logs" -maxdepth 1 -type f -name 'aidev-*.log' 2>/dev/null | sort | tail -1)
@@ -745,6 +758,268 @@ run env AIDEV_STEPS_FILE="$WORK/definitely-missing.conf" timeout 30 \
     bash aidev_update.sh --list > "$WORK/missingcfg.out" 2>&1
 check_eq "missing AIDEV_STEPS_FILE rejected" 2 "$?"
 check_contains "missing AIDEV_STEPS_FILE named" "definitely-missing.conf" "$WORK/missingcfg.out"
+
+echo "== saved selection file =="
+cat > "$WORK/marker.conf" <<'EOF'
+# aidev-selection-v1
+script|ok.sh|OK Step
+# disabled: script|fail.sh|Fail Step
+cmd|echo from-marker|Marker Cmd
+# disabled: nope
+EOF
+run env AIDEV_STEPS_FILE="$WORK/marker.conf" bash aidev_update.sh --list \
+    > "$WORK/markerlist.out" 2>&1
+check_eq "marker selection --list exits 0" 0 "$?"
+check_contains "marker selection lists the enabled step" "OK Step" "$WORK/markerlist.out"
+check_contains "marker selection lists the enabled command" "Marker Cmd" "$WORK/markerlist.out"
+check_contains "marker selection lists the disabled step" "Fail Step" "$WORK/markerlist.out"
+check_contains "malformed disabled line is reported" "malformed disabled step" "$WORK/markerlist.out"
+check_absent "marker selection hides the built-in table" "Slow Step" "$WORK/markerlist.out"
+
+run env AIDEV_STEPS_FILE="$WORK/marker.conf" AIDEV_NO_LOG=1 timeout 30 \
+    bash aidev_update.sh > "$WORK/markerrun.out" 2>&1
+check_eq "marker selection run exits 0" 0 "$?"
+check_contains "marker selection runs the enabled script" "ok.sh running" "$WORK/markerrun.out"
+check_contains "marker selection runs the enabled command" "from-marker" "$WORK/markerrun.out"
+check_absent "marker selection does not run a disabled step" "fail.sh failing" "$WORK/markerrun.out"
+
+cat > "$WORK/none.conf" <<'EOF'
+# aidev-selection-v1
+# disabled: script|ok.sh|OK Step
+EOF
+run env AIDEV_STEPS_FILE="$WORK/none.conf" AIDEV_NO_LOG=1 timeout 30 \
+    bash aidev_update.sh --dry-run > "$WORK/none.out" 2>&1
+check_eq "select NONE is a successful no-op" 0 "$?"
+check_contains "select NONE explains that nothing ran" "No tools are selected" "$WORK/none.out"
+check_absent "select NONE does not fall back to the built-in table" "[would run]" "$WORK/none.out"
+check_absent "select NONE does not run a step" "ok.sh running" "$WORK/none.out"
+
+echo "== selection menu script =="
+SELECT="$REPO_DIR/aidev_select.sh"
+cat > "$WORK/menu-cat.txt" <<'EOF'
++|script|ok.sh|OK Step
+-|script|fail.sh|Fail Step
++|cmd|echo hello|Cmd Step
+EOF
+
+has_line() {
+    if grep -qxF -- "$3" "$2"; then
+        pass "$1"
+    else
+        fail "$1 (missing exact line '$3')"
+    fi
+}
+lacks_line() {
+    if grep -qxF -- "$3" "$2"; then
+        fail "$1 (unexpected exact line '$3')"
+    else
+        pass "$1"
+    fi
+}
+
+printf '\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-sel.conf" > "$WORK/menu-save.out" 2>&1
+check_eq "enter saves the built-in defaults" 0 "$?"
+check_contains "save reports the count" "Saved 2 of 3" "$WORK/menu-save.out"
+has_line "default keeps OK Step on" "$WORK/menu-sel.conf" "script|ok.sh|OK Step"
+has_line "default keeps the command on" "$WORK/menu-sel.conf" "cmd|echo hello|Cmd Step"
+has_line "default keeps Fail Step off" "$WORK/menu-sel.conf" "# disabled: script|fail.sh|Fail Step"
+check_contains "saved file carries the selection marker" "aidev-selection-v1" "$WORK/menu-sel.conf"
+
+printf 'n\n\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-none.conf" > "$WORK/menu-none.out" 2>&1
+check_eq "select NONE saves" 0 "$?"
+check_contains "select NONE saves zero tools" "Saved 0 of 3" "$WORK/menu-none.out"
+lacks_line "select NONE turns OK Step off" "$WORK/menu-none.conf" "script|ok.sh|OK Step"
+has_line "select NONE records OK Step as disabled" "$WORK/menu-none.conf" "# disabled: script|ok.sh|OK Step"
+
+printf 'a\n\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-all.conf" > "$WORK/menu-all.out" 2>&1
+check_eq "select ALL saves" 0 "$?"
+check_contains "select ALL saves every tool" "Saved 3 of 3" "$WORK/menu-all.out"
+has_line "select ALL turns Fail Step on" "$WORK/menu-all.conf" "script|fail.sh|Fail Step"
+check_absent "select ALL writes no disabled lines" "# disabled:" "$WORK/menu-all.conf"
+
+printf 'select none\n\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-phrase.conf" > "$WORK/menu-phrase.out" 2>&1
+check_eq "the words select none save" 0 "$?"
+lacks_line "select none turns the command off" "$WORK/menu-phrase.conf" "cmd|echo hello|Cmd Step"
+
+printf -- '-1 +2\n\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-pm.conf" > "$WORK/menu-pm.out" 2>&1
+check_eq "explicit on/off saves" 0 "$?"
+has_line "minus turns OK Step off" "$WORK/menu-pm.conf" "# disabled: script|ok.sh|OK Step"
+has_line "plus turns Fail Step on" "$WORK/menu-pm.conf" "script|fail.sh|Fail Step"
+has_line "an untouched tool stays on" "$WORK/menu-pm.conf" "cmd|echo hello|Cmd Step"
+
+printf '1 99\n\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-bad.conf" > "$WORK/menu-bad.out" 2>&1
+check_eq "a bad number still reaches save" 0 "$?"
+check_contains "a bad number is reported" "No tool numbered 99" "$WORK/menu-bad.out"
+has_line "a bad number does not apply earlier toggles" "$WORK/menu-bad.conf" "script|ok.sh|OK Step"
+
+echo sentinel > "$WORK/menu-keep.conf"
+printf '1\nq\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-keep.conf" > "$WORK/menu-quit.out" 2>&1
+check_eq "quit exits 2" 2 "$?"
+check_contains "quit says the save was skipped" "Saved selection was not changed" "$WORK/menu-quit.out"
+check_contains "quit leaves the file untouched" "sentinel" "$WORK/menu-keep.conf"
+check_absent "quit does not write a selection" "aidev-selection-v1" "$WORK/menu-keep.conf"
+
+rm -f "$WORK/menu-notty.conf"
+printf '\n' | bash "$SELECT" --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-notty.conf" > "$WORK/menu-notty.out" 2>&1
+check_eq "a non-terminal call exits 0" 0 "$?"
+if [ -f "$WORK/menu-notty.conf" ]; then
+    fail "a non-terminal call does not write a selection"
+else
+    pass "a non-terminal call does not write a selection"
+fi
+
+cat > "$WORK/menu-legacy.conf" <<'EOF'
+# Hand written, before the menu existed.
+script|ok.sh|Old description
+EOF
+printf '\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-legacy.conf" > "$WORK/menu-legacy.out" 2>&1
+check_eq "legacy steps.conf can be confirmed" 0 "$?"
+has_line "legacy listed tool stays on" "$WORK/menu-legacy.conf" "script|ok.sh|OK Step"
+has_line "legacy omits a default-on tool, so it stays off" "$WORK/menu-legacy.conf" "# disabled: cmd|echo hello|Cmd Step"
+check_contains "confirming a legacy file adds the marker" "aidev-selection-v1" "$WORK/menu-legacy.conf"
+check_absent "catalogue description replaces the stale one" "Old description" "$WORK/menu-legacy.conf"
+
+cat > "$WORK/menu-new.conf" <<'EOF'
+# aidev-selection-v1
+script|ok.sh|OK Step
+# disabled: script|fail.sh|Fail Step
+cmd|echo custom-tool|Custom Tool
+EOF
+printf '\n' | bash "$SELECT" --force --catalog "$WORK/menu-cat.txt" \
+    --selection "$WORK/menu-new.conf" > "$WORK/menu-new.out" 2>&1
+check_eq "an existing marker selection can be confirmed" 0 "$?"
+has_line "a tool added to the catalogue defaults to on" "$WORK/menu-new.conf" "cmd|echo hello|Cmd Step"
+has_line "a previously disabled tool stays off" "$WORK/menu-new.conf" "# disabled: script|fail.sh|Fail Step"
+has_line "a hand-added tool stays on" "$WORK/menu-new.conf" "cmd|echo custom-tool|Custom Tool"
+
+echo "== selection menu through aidev_update.sh =="
+# Drive the real startup menu on a pty. Replies are sent when "Choice:" appears.
+# An empty reply is enter. The orchestrator args are one string, split safely.
+drive_menu() {
+    local dir="$1" outfile="$2" rcfile="$3" orch_args="$4"
+    shift 4
+    python3 - "$dir" "$outfile" "$rcfile" "$orch_args" "$@" <<'PY'
+import fcntl, os, select, shlex, struct, subprocess, sys, termios, time
+menu_dir, out_path, rc_path, orch_args = sys.argv[1:5]
+replies = [item + "\n" for item in sys.argv[5:]]
+master, slave = os.openpty()
+try:
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 160, 0, 0))
+except OSError:
+    pass
+env = dict(os.environ)
+env.pop("AIDEV_STEPS_FILE", None)
+env.pop("AIDEV_NO_MENU", None)
+env["AIDEV_NO_LOG"] = "1"
+proc = subprocess.Popen(
+    ["bash", "aidev_update.sh"] + shlex.split(orch_args),
+    stdin=slave, stdout=slave, stderr=slave,
+    cwd=menu_dir,
+    preexec_fn=os.setsid,
+    env=env,
+)
+os.close(slave)
+full = b""
+seen = 0
+deadline = time.time() + 15
+
+def pump():
+    global full
+    readable, _, _ = select.select([master], [], [], 0.2)
+    if master not in readable:
+        return True
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        return False
+    if not chunk:
+        return False
+    full += chunk
+    return True
+
+for reply in replies:
+    while full.find(b"Choice:", seen) < 0:
+        if time.time() > deadline or proc.poll() is not None:
+            break
+        if not pump():
+            break
+    at = full.find(b"Choice:", seen)
+    if at < 0:
+        break
+    seen = at + len(b"Choice:")
+    try:
+        os.write(master, reply.encode())
+    except OSError:
+        break
+while time.time() < deadline and proc.poll() is None:
+    if not pump():
+        break
+if proc.poll() is None:
+    os.killpg(proc.pid, 15)
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, 9)
+        proc.wait(timeout=2)
+os.close(master)
+open(out_path, "wb").write(full.replace(b"\r", b""))
+code = proc.returncode if proc.returncode is not None else 99
+open(rc_path, "w").write(str(code))
+PY
+}
+
+MENU_QUIT="$WORK/menu-quit-dir"
+mkdir -p "$MENU_QUIT"
+cp "$WORK/aidev_update.sh" "$MENU_QUIT/aidev_update.sh"
+cp "$REPO_DIR/aidev_select.sh" "$MENU_QUIT/aidev_select.sh"
+drive_menu "$MENU_QUIT" "$WORK/pty-quit.out" "$WORK/pty-quit.rc" "--dry-run" "q"
+check_eq "quit from the startup menu exits 2" 2 "$(cat "$WORK/pty-quit.rc")"
+check_contains "startup menu offers select ALL" "select ALL" "$WORK/pty-quit.out"
+check_contains "startup menu offers select NONE" "select NONE" "$WORK/pty-quit.out"
+check_contains "quit from the startup menu cancels" "Saved selection was not changed" "$WORK/pty-quit.out"
+check_absent "quit does not start a dry run" "Dry run:" "$WORK/pty-quit.out"
+if [ -f "$MENU_QUIT/steps.conf" ]; then
+    fail "quit does not create steps.conf"
+else
+    pass "quit does not create steps.conf"
+fi
+
+MENU_NONE="$WORK/menu-none-dir"
+mkdir -p "$MENU_NONE"
+cp "$WORK/aidev_update.sh" "$MENU_NONE/aidev_update.sh"
+cp "$REPO_DIR/aidev_select.sh" "$MENU_NONE/aidev_select.sh"
+drive_menu "$MENU_NONE" "$WORK/pty-none.out" "$WORK/pty-none.rc" "--dry-run" "n" ""
+check_eq "select NONE from the startup menu exits 0" 0 "$(cat "$WORK/pty-none.rc")"
+check_contains "select NONE from the startup menu updates nothing" "No tools are selected" "$WORK/pty-none.out"
+has_line "startup menu records a disabled tool" "$MENU_NONE/steps.conf" "# disabled: script|ok.sh|OK Step"
+lacks_line "startup menu does not leave that tool enabled" "$MENU_NONE/steps.conf" "script|ok.sh|OK Step"
+drive_menu "$MENU_NONE" "$WORK/pty-again.out" "$WORK/pty-again.rc" "--dry-run" ""
+check_eq "the next run accepts the saved selection" 0 "$(cat "$WORK/pty-again.rc")"
+check_contains "the next run starts from the saved selection" "Starting point: saved selection." "$WORK/pty-again.out"
+check_contains "the next run still updates nothing" "No tools are selected" "$WORK/pty-again.out"
+
+MENU_SKIP="$WORK/menu-skip-dir"
+mkdir -p "$MENU_SKIP"
+cp "$WORK/aidev_update.sh" "$MENU_SKIP/aidev_update.sh"
+cp "$REPO_DIR/aidev_select.sh" "$MENU_SKIP/aidev_select.sh"
+drive_menu "$MENU_SKIP" "$WORK/pty-skip.out" "$WORK/pty-skip.rc" "--no-menu --dry-run"
+check_eq "--no-menu on a terminal exits 0" 0 "$(cat "$WORK/pty-skip.rc")"
+check_contains "--no-menu still dry-runs" "Dry run:" "$WORK/pty-skip.out"
+check_absent "--no-menu does not prompt" "select ALL" "$WORK/pty-skip.out"
+if [ -f "$MENU_SKIP/steps.conf" ]; then
+    fail "--no-menu does not create steps.conf"
+else
+    pass "--no-menu does not create steps.conf"
+fi
 
 echo ""
 echo "====================================="
