@@ -52,9 +52,9 @@ menu_main() {
 }
 
 # Fake tools. The ok/fail/hang variants record they ran via marker files.
-mktool() { printf '#!/usr/bin/env bash\necho x >> %s.ran\n' "$1" > "$WORK/${1}_update.sh"; }
-mkfail() { printf '#!/usr/bin/env bash\necho x >> %s.ran\nexit 3\n' "$1" > "$WORK/${1}_update.sh"; }
-mkhang() { printf '#!/usr/bin/env bash\necho x >> %s.ran\nsleep 30\n' "$1" > "$WORK/${1}_update.sh"; }
+mktool() { printf '#!/usr/bin/env bash\necho x >> %s.ran\n' "$1" > "$WORK/${1}_update.sh"; chmod +x "$WORK/${1}_update.sh"; }
+mkfail() { printf '#!/usr/bin/env bash\necho x >> %s.ran\nexit 3\n' "$1" > "$WORK/${1}_update.sh"; chmod +x "$WORK/${1}_update.sh"; }
+mkhang() { printf '#!/usr/bin/env bash\necho x >> %s.ran\nsleep 30\n' "$1" > "$WORK/${1}_update.sh"; chmod +x "$WORK/${1}_update.sh"; }
 
 echo "== 1. non-tty, no selection.md: everything runs, no file created =="
 new_sandbox
@@ -65,6 +65,17 @@ check_eq "exit 0" "$RC" "0"
 check_file "$WORK/aa.ran" "aa ran"
 check_file "$WORK/bb.ran" "bb ran"
 check_nofile "$WORK/selection.md" "selection.md not created"
+
+echo "== 1b. a tool without the executable bit fails and the rest still run =="
+new_sandbox
+mktool aa
+mktool bb
+chmod -x "$WORK/aa_update.sh"
+run_main
+check_eq "exit 1" "$RC" "1"
+check_nofile "$WORK/aa.ran" "non-executable aa did not run"
+check_file "$WORK/bb.ran" "bb still ran"
+check_out "names the problem" "not executable" "$OUT"
 
 echo "== 2. selection.md [ ] entries are skipped =="
 new_sandbox

@@ -34,6 +34,13 @@ code is `1` when any tool failed, `0` otherwise.
   machine. See `claude_update.sh` or `pi_update.sh` for the pattern. Tools
   without a built-in command keep their full install/update logic
   (e.g. `codex_update.sh`, which tracks the alpha channel).
+- **Order**: tools run alphabetically, except `node_update.sh`, which always
+  goes first. It updates nvm, then every Node line installed under nvm to its
+  latest release (global packages and npm carried over, older patches
+  removed). After it, the orchestrator re-points `PATH` at the default node so
+  the later tools still find `node`/`npm`. `AIDEV_NODE_ALLOW_SCRIPTS` lists the
+  packages whose install scripts may run during that reinstall (npm 12 blocks
+  them by default).
 - **Remove**: delete its script. Its line disappears from `selection.md` on
   the next menu save.
 - `selection.md` is plain markdown checkboxes and safe to edit by hand:

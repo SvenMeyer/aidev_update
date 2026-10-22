@@ -16,8 +16,12 @@ STEP_TIMEOUT="${AIDEV_STEP_TIMEOUT:-600}"   # per-tool hang cap; env override is
 [ $# -eq 0 ] || echo "note: no options — tools are picked in the menu or in $SELECTION_FILE" >&2
 
 # --- 1. Discover tools: the directory is the tool list ----------------------
+# FIRST_TOOL goes ahead of the alphabetical rest: the others install with npm
+# and should see the freshly updated node.
+FIRST_TOOL="node_update.sh"
 mapfile -t TOOLS < <(cd "$SCRIPT_DIR" && ls -1 -- *_update.sh 2>/dev/null \
-                     | sort | grep -vxF -- "$SELF")
+                     | sort | grep -vxF -- "$SELF" \
+                     | awk -v first="$FIRST_TOOL" '$0==first{print; next} {rest[++n]=$0} END{for(i=1;i<=n;i++)print rest[i]}')
 if [ "${#TOOLS[@]}" -eq 0 ]; then
     echo "No *_update.sh scripts found in $SCRIPT_DIR" >&2
     exit 0
@@ -108,6 +112,18 @@ menu_loop() {
 }
 
 # --- 4. Run the selected tools one after the other --------------------------
+# node_update.sh can delete the node this shell's PATH points at; re-point the
+# PATH at the default node so the following tools still find node/npm.
+refresh_node_env() {
+    local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+    [ -s "$nvm_dir/nvm.sh" ] || return 0
+    set +u
+    . "$nvm_dir/nvm.sh" >/dev/null 2>&1
+    nvm use --silent default >/dev/null 2>&1
+    set -u
+    hash -r
+}
+
 run_selected() {
     local i name selected=0 failed=0
     local -a failures=()
@@ -117,6 +133,12 @@ run_selected() {
         name="${TOOLS[i]%_update.sh}"
         echo ""
         echo "=== $name ==="
+        if [ ! -x "$SCRIPT_DIR/${TOOLS[i]}" ]; then
+            echo "✗ $name — ${TOOLS[i]} is not executable (chmod +x it)" >&2
+            failed=$((failed + 1))
+            failures+=("$name")
+            continue
+        fi
         if command -v timeout >/dev/null 2>&1; then
             timeout --kill-after=10 "$STEP_TIMEOUT" bash "$SCRIPT_DIR/${TOOLS[i]}"
         else
@@ -129,6 +151,7 @@ run_selected() {
             failed=$((failed + 1))
             failures+=("$name")
         fi
+        [ "${TOOLS[i]}" = "$FIRST_TOOL" ] && refresh_node_env
     done
     echo ""
     if [ "$selected" -eq 0 ]; then
