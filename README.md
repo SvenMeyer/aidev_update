@@ -38,9 +38,11 @@ code is `1` when any tool failed, `0` otherwise.
   goes first. It updates nvm, then every Node line installed under nvm to its
   latest release (global packages and npm carried over, older patches
   removed). After it, the orchestrator re-points `PATH` at the default node so
-  the later tools still find `node`/`npm`. `AIDEV_NODE_ALLOW_SCRIPTS` lists the
-  packages whose install scripts may run during that reinstall (npm 12 blocks
-  them by default).
+  the later tools still find `node`/`npm`. It also adds the native-binary CLIs
+  to `allow-scripts` in `~/.npmrc` — npm 12 blocks install scripts by default,
+  and without them a plain `npm install -g` (e.g. `claude update` on an npm
+  install) leaves the CLI without its binary. `AIDEV_NODE_ALLOW_SCRIPTS`
+  replaces the default list.
 - **Remove**: delete its script. Its line disappears from `selection.md` on
   the next menu save.
 - `selection.md` is plain markdown checkboxes and safe to edit by hand:

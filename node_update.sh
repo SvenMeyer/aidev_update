@@ -4,11 +4,22 @@
 # a line are removed once the new one is in. aidev_update.sh runs this first,
 # so the tool updaters after it see the fresh node/npm.
 #
-# AIDEV_NODE_ALLOW_SCRIPTS: comma-separated packages whose install scripts may
-# run while global packages are reinstalled (npm 12 blocks them by default,
-# which leaves native-binary CLIs such as claude and opencode unusable).
+# npm 12 blocks install scripts by default, which leaves native-binary CLIs
+# (claude, opencode, ...) unusable after any `npm install -g`. This script adds
+# ALLOW_SCRIPTS to `allow-scripts` in the user ~/.npmrc, so every later global
+# install — by the other updaters or by hand — runs them. Entries already in
+# ~/.npmrc are kept. AIDEV_NODE_ALLOW_SCRIPTS replaces the list below.
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-ALLOW_SCRIPTS="${AIDEV_NODE_ALLOW_SCRIPTS:-@anthropic-ai/claude-code,opencode-ai,@kilocode/cli,@minimax-ai/code,codebuff,@just-every/code,@github/keytar,node-pty,better-sqlite3,esbuild,bufferutil,tree-sitter-bash}"
+ALLOW_SCRIPTS="${AIDEV_NODE_ALLOW_SCRIPTS:-@anthropic-ai/claude-code,opencode-ai,@kilocode/cli,@minimax-ai/code,codebuff,@just-every/code,@github/keytar,node-pty,better-sqlite3,esbuild,bufferutil,tree-sitter-bash,protobufjs,@lvce-editor/ripgrep,tldjs}"
+
+# Merge ALLOW_SCRIPTS into the user config's allow-scripts (no-op when covered).
+ensure_allow_scripts() {
+    local have merged
+    have=$(npm config get allow-scripts --location=user 2>/dev/null)
+    merged=$(printf '%s\n' ${have//,/ } ${ALLOW_SCRIPTS//,/ } | awk 'NF && !seen[$0]++' | paste -sd,)
+    [ "$merged" = "$have" ] && return 0
+    npm config set "allow-scripts=$merged" --location=user && echo "npm allow-scripts updated in ~/.npmrc"
+}
 
 # --- 1. nvm itself -----------------------------------------------------------
 # nvm is a git clone; the official installer fast-forwards it to a release tag.
@@ -49,8 +60,10 @@ if [ "${#LINES[@]}" -eq 0 ]; then
     echo "No nvm-managed Node found — installing the latest LTS…"
     npm_config_allow_scripts="$ALLOW_SCRIPTS" nvm install --lts --latest-npm || exit 1
     nvm alias default 'lts/*' >/dev/null
+    ensure_allow_scripts
     exit 0
 fi
+ensure_allow_scripts
 
 # Drop every older patch of a line (default pinned to one moves to the newest first).
 prune_line() {
@@ -77,8 +90,7 @@ for line in "${LINES[@]}"; do
         echo "node $old is up to date."
     else
         echo "node $old → $new"
-        if ! npm_config_allow_scripts="$ALLOW_SCRIPTS" \
-             nvm install "$new" --reinstall-packages-from="$old" --latest-npm; then
+        if ! nvm install "$new" --reinstall-packages-from="$old" --latest-npm; then
             echo "✗ node $new install failed — keeping $old" >&2
             failed=1
             continue
