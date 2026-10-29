@@ -113,13 +113,21 @@ menu_loop() {
 
 # --- 4. Run the selected tools one after the other --------------------------
 # node_update.sh can delete the node this shell's PATH points at; re-point the
-# PATH at the default node so the following tools still find node/npm.
+# PATH at the default node so the following tools still find node/npm. If the
+# default is unusable, take the newest nvm node: falling through to the system
+# npm makes every npm tool look "not installed" and fail on /usr/lib (EACCES).
 refresh_node_env() {
     local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
     [ -s "$nvm_dir/nvm.sh" ] || return 0
     set +u
-    . "$nvm_dir/nvm.sh" >/dev/null 2>&1
-    nvm use --silent default >/dev/null 2>&1
+    . "$nvm_dir/nvm.sh" --no-use >/dev/null 2>&1
+    if ! nvm use --silent default >/dev/null 2>&1; then
+        if nvm use --silent node >/dev/null 2>&1; then
+            echo "⚠ nvm default is not installed — using $(nvm current) for the remaining tools" >&2
+        else
+            echo "⚠ no usable nvm node — the remaining tools get the system npm" >&2
+        fi
+    fi
     set -u
     hash -r
 }

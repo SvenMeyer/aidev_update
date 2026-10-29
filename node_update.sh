@@ -52,11 +52,11 @@ else
 fi
 . "$NVM_DIR/nvm.sh"
 
-# --- 2. Node: latest release of every installed line --------------------------
-# Lines come from what is installed (v24.x.y → 24); nothing new is added.
-mapfile -t LINES < <(ls -1 "$NVM_DIR/versions/node" 2>/dev/null \
-    | grep -oE '^v[0-9]+' | sort -uV)
-if [ "${#LINES[@]}" -eq 0 ]; then
+installed_lines() {
+    ls -1 "$NVM_DIR/versions/node" 2>/dev/null | grep -oE '^v[0-9]+' | sort -uV
+}
+
+if [ -z "$(installed_lines)" ]; then
     echo "No nvm-managed Node found — installing the latest LTS…"
     npm_config_allow_scripts="$ALLOW_SCRIPTS" nvm install --lts --latest-npm || exit 1
     nvm alias default 'lts/*' >/dev/null
@@ -64,6 +64,43 @@ if [ "${#LINES[@]}" -eq 0 ]; then
     exit 0
 fi
 ensure_allow_scripts
+failed=0
+
+# --- 2. Follow the default alias onto a new line ------------------------------
+# A floating default (lts/*, node) jumps to a new major line by itself, e.g.
+# lts/* 24 → 26. Then nothing installed matches it, `nvm use default` fails and
+# every later tool silently gets the system npm. Install the line default now
+# points at, re-running `npm install -g` for the global packages of the newest
+# installed node (a fresh install, so native modules are rebuilt), then remove
+# the line it replaces together with everything installed on it.
+default_alias=$(cat "$NVM_DIR/alias/default" 2>/dev/null)
+if [ -n "$default_alias" ] && [ "$default_alias" != system ] \
+   && [ "$(nvm version default 2>/dev/null)" = N/A ]; then
+    want=$(nvm version-remote "$default_alias" 2>/dev/null)
+    from=$(nvm version node 2>/dev/null)   # newest installed
+    if [ -z "$want" ] || [ "$want" = N/A ]; then
+        echo "⚠ default ($default_alias) is not installed and its release is unknown" >&2
+        failed=1
+    else
+        echo "default ($default_alias) now means $want — installing it with the global packages of $from"
+        if nvm install "$want" --reinstall-packages-from="$from" --latest-npm; then
+            old_line=${from%%.*} new_line=${want%%.*}
+            if [ "$old_line" != "$new_line" ]; then
+                nvm use --silent "$want" >/dev/null 2>&1   # nvm refuses to remove the active version
+                for v in $(ls -1 "$NVM_DIR/versions/node" | grep -E "^$old_line\\."); do
+                    nvm uninstall "$v" >/dev/null 2>&1 && echo "removed node $v and its global packages"
+                done
+            fi
+        else
+            echo "✗ node $want install failed — keeping $from" >&2
+            failed=1
+        fi
+    fi
+fi
+
+# --- 3. Node: latest release of every installed line --------------------------
+# Lines come from what is installed (v24.x.y → 24); nothing new is added.
+mapfile -t LINES < <(installed_lines)
 
 # Drop every older patch of a line (default pinned to one moves to the newest first).
 prune_line() {
@@ -79,7 +116,6 @@ prune_line() {
     done
 }
 
-failed=0
 for line in "${LINES[@]}"; do
     new=$(nvm version-remote "$line" 2>/dev/null)
     old=$(nvm version "$line" 2>/dev/null)
