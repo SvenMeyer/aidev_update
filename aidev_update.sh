@@ -148,7 +148,7 @@ run_selected() {
             continue
         fi
         if command -v timeout >/dev/null 2>&1; then
-            timeout --kill-after=10 "$STEP_TIMEOUT" bash "$SCRIPT_DIR/${TOOLS[i]}"
+            timeout --foreground --kill-after=10 "$STEP_TIMEOUT" bash "$SCRIPT_DIR/${TOOLS[i]}"
         else
             bash "$SCRIPT_DIR/${TOOLS[i]}"
         fi
