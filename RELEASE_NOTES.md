@@ -1,5 +1,60 @@
 # Release Notes
 
+## 2026-11-10 (v2.1.0)
+
+### Pi: managed installation, extensions updated too (`pi_update.sh`)
+
+**What changed**
+
+- `pi_update.sh` now runs `pi update --all`. Plain `pi update` only updates pi
+  itself and prints "Extensions are skipped"; `--all` also updates installed
+  extensions.
+- Pi is kept on pi.dev's *managed* installation instead of `npm install -g`.
+  The script only calls the official installer (`https://pi.dev/install.sh`)
+  when pi is missing (fresh install) or is still an npm-global package
+  (migration). A managed pi is only ever updated with `pi update --all`.
+- If Node 22.19+ is missing, `node_update.sh` (nvm + latest LTS) provides it
+  first, rather than the installer's own brew/apt/standalone options.
+- `aidev_update.sh` runs each step with `timeout --foreground`, so a step that
+  needs a prompt (the installer on a first run) can still read the terminal.
+
+**Why managed instead of npm global**
+
+The old setup was never a decision: `pi_update.sh` was copied from the generic
+`*_update.sh` template, whose default is `npm install -g`. Reading the official
+installer showed the npm route is the weaker one:
+
+- The npm package ships no `npm-shrinkwrap.json`, so every update re-resolved
+  all transitive dependencies at install time (a typical update reported
+  "changed 120 packages").
+- `pi update` installs with `--min-release-age=0`, which switches off npm's
+  release-age cooldown, so a freshly published malicious sub-dependency would
+  be accepted immediately.
+- The managed installer downloads Pi's own `package.json` + lockfile from
+  `pi.dev/api/installer/releases` and runs `npm ci --ignore-scripts --omit=dev`:
+  exact locked versions with integrity hashes, no lifecycle scripts. The new
+  release is staged and smoke-tested (`pi --version`) before it is activated,
+  and the npm copy is removed only afterwards, so a failed install leaves the
+  old pi working.
+- Trade-off: the lockfile comes from pi.dev, so pi.dev is trusted in addition
+  to npm. Pinning only helps as far as Pi's maintainers vet what they lock;
+  that is an assumption, not something we verified.
+
+**Decisions on installer behaviour**
+
+- First run may ask questions; that is fine. Enter accepts the defaults.
+- Never reinstall a managed pi that is current, and never uninstall: the
+  installer is not called at all in those cases. Uninstalling is done by running
+  the official installer by hand.
+- Add the bin directory to the shell profile: yes (the installer's default).
+- "Start pi now?": never. The installer runs as `sh installer | cat`, which
+  keeps its stdout off a tty, and the installer skips that prompt then.
+- Not covered: installing from a machine with no terminal and no Node (the
+  installer cannot install Node without a tty; `node_update.sh` covers Node).
+- Tested on the existing machine (migration done by hand, then the update
+  path); the fresh-install and migrate branches of the script are not exercised
+  by a test.
+
 ## 2026-10-02 (v2.0.0)
 
 ### Lean rewrite
