@@ -4,15 +4,6 @@
 .repowise/
 .neon
 
-# Run logs
-logs/
-
-# Concurrency lock
-.aidev_update.lock
-
-# Local step table (overrides the built-in one when present)
-steps.conf
-
 # Tool selection of the v2 update menu
 selection.md
 selection.md.*

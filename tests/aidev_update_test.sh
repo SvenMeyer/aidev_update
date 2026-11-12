@@ -157,14 +157,14 @@ check_nogrep "stale zz dropped" "zz" "$WORK/selection.md"
 echo "== 8. self-discovery guard =="
 new_sandbox
 mktool aa
-# a decoy legacy script that must NOT be picked up by the *_update.sh glob
-printf '#!/usr/bin/env bash\necho x >> v1.ran\n' > "$WORK/aidev_update_v1.sh"
+# a decoy script that must NOT be picked up by the *_update.sh glob
+printf '#!/usr/bin/env bash\necho x >> decoy.ran\n' > "$WORK/aidev_update_old.sh"
 OUT=$(cd "$WORK" && timeout 60 bash aidev_update.sh 2>&1 </dev/null)
 RC=$?
 check_eq "exit 0 (no recursion)" "$RC" "0"
 check_file "$WORK/aa.ran" "aa ran"
-check_nofile "$WORK/v1.ran" "aidev_update_v1.sh not discovered"
-check_noout "v1 never mentioned" "v1" "$OUT"
+check_nofile "$WORK/decoy.ran" "aidev_update_old.sh not discovered"
+check_noout "decoy never mentioned" "aidev_update_old" "$OUT"
 
 echo "== 9. empty selection =="
 new_sandbox

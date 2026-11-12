@@ -1,5 +1,19 @@
 # Release Notes
 
+## 2026-11-12 (v2.2.0)
+
+### Legacy v1 orchestrator removed
+
+- Removed `aidev_update_v1.sh`, its selector `aidev_select.sh` and its test
+  suite `tests/orchestrator_test.sh`. `aidev_update.sh` (v2) with its menu and
+  `selection.md` is now the only orchestrator.
+- `.gitignore` no longer lists the v1 state (`steps.conf`,
+  `.aidev_update.lock`, `logs/`), and the README no longer mentions v1.
+- Leftover v1 files in a working copy can be deleted: v2 never reads them. A
+  stale `steps.conf` that still showed tools as `# disabled:` was confusing
+  because it looked like the current selection.
+- v1 stays available in git history (tag `v2.1.1` and earlier).
+
 ## 2026-11-12 (v2.1.1)
 
 ### Qwen Code: stable releases only (`qwen_update.sh`)

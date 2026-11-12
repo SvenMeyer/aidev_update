@@ -56,13 +56,10 @@ code is `1` when any tool failed, `0` otherwise.
 
 ```bash
 ./tests/aidev_update_test.sh     # v2 orchestrator
-./tests/orchestrator_test.sh     # legacy orchestrator (aidev_update_v1.sh)
 ./tests/codex_update_test.sh     # codex updater
 ```
 
-## Legacy
+## Design
 
-The previous feature-rich orchestrator (parallel jobs, retries, run logging,
-filters) is kept unchanged as `aidev_update_v1.sh`, together with its
-`aidev_select.sh` selector and `steps.conf` state file. The v2 design and
-the reasoning behind the rewrite are documented in `specs_v2.md`.
+The design of the orchestrator and the reasoning behind it are documented in
+`specs_v2.md`.
