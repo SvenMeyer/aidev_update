@@ -1,5 +1,17 @@
 # Release Notes
 
+## 2026-11-12 (v2.1.1)
+
+### Qwen Code: stable releases only (`qwen_update.sh`)
+
+- `qwen_update.sh` now installs the npm dist-tag `latest` (stable) instead of
+  whichever `0.*` version was published most recently, which could be a
+  nightly, preview or dev build.
+- If a prerelease (e.g. `-nightly`) is installed, it is replaced by the current
+  stable version, even when that means a lower version number.
+- The `jq` dependency is gone. The old filter on `npm view … time` also failed
+  with `startswith() requires string inputs`.
+
 ## 2026-11-10 (v2.1.0)
 
 ### Pi: managed installation, extensions updated too (`pi_update.sh`)
